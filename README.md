@@ -16,8 +16,8 @@
 | 代码模拟鼠标操作 | ✅ 真实鼠标事件（mousedown → mousemove → mouseup） |
 | Part 3 混合模式 | ✅ |
 | 5×5 难度 | ✅ 25 格 + 5 诱饵，稳定通关 |
-| 重叠开局（附加） | ⬜ 未做 |
-| 居中开局（附加） | ⬜ 未做 |
+| 重叠开局（附加） | 🟡 部分可用：`solver/run_overlap.py`，实测 14–17/25，未稳定通关 |
+| 居中开局（附加） | 🟡 同上（`--mode center`） |
 
 ---
 
@@ -226,6 +226,7 @@ shots/04_page.png           整页截图
 │   ├── solver_core.py    布局复现、块分类、匈牙利指派、锚点排序、拖拽
 │   ├── white_shape.py    白块齿型判定、白格齿型探测
 │   ├── yolo_check.py     YOLO 分类器封装（15 类）
+│   ├── run_overlap.py    附加题：重叠 / 居中开局（先摊开再识别）
 │   └── layout.py         布局几何（独立可验证版）
 ├── tools/
 │   ├── download_catalog.py   下载站点 388 张素材
@@ -240,7 +241,8 @@ shots/04_page.png           整页截图
 │   ├── demo_part3_5x5.mp4    演示视频（25/25 通关）
 │   └── screenshots/          过程截图
 └── docs/
-    └── site-mechanics.md     站点机制分析
+    ├── site-mechanics.md        站点机制分析
+    └── BONUS_overlap_center.md  附加题：做法、实测、难点
 ```
 
 ---

@@ -35,8 +35,12 @@ import numpy as np
 
 # ---------------------------------------------------------------- 布局几何
 
-def compute_layout(cw, ch, rows, cols, n_decoys=0):
-    """复现 setupBoardLayout / applyBoardGeometry / traySlots。"""
+def compute_layout(cw, ch, rows, cols, n_decoys=0, overlap=False):
+    """复现 setupBoardLayout / applyBoardGeometry / traySlots。
+
+    overlap=True 时对应「初始重叠 / 初始居中」开局：块堆在画布上而不是托盘里，
+    站点不预留托盘空间（wanted=0），棋盘按满尺寸摆放。
+    """
     padding = 30
     max_board_w = min(cw * 0.65, 750)
     max_board_h = min(ch - padding * 2, 550)
@@ -44,7 +48,7 @@ def compute_layout(cw, ch, rows, cols, n_decoys=0):
     if bh > max_board_h:
         bh = max_board_h
         bw = bh / 0.75
-    wanted = rows * cols + n_decoys
+    wanted = 0 if overlap else rows * cols + n_decoys
 
     def geo(scale):
         w, h = bw * scale, bh * scale
