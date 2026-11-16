@@ -3,7 +3,7 @@
 这是布局数学，不含任何答案信息：棋盘矩形、格子尺寸、托盘槽位位置。
 所有拼图块必然落在这些槽位之一。
 """
-
+##这个并未参与解决，而是提前估计
 
 def compute(cw, ch, rows, cols, n_decoys=0, overlap=False, center=False):
     padding = 30

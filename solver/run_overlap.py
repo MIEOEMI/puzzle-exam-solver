@@ -216,7 +216,7 @@ def main():
     ap.add_argument("--mode", choices=["overlap", "center"], default="overlap")
     ap.add_argument("--theme", default="mixed")
     ap.add_argument("--diff", type=int, default=25)
-    ap.add_argument("--headful", action="store_true")
+    ap.add_argument("--headful",default=True, action="store_true", help="弹窗口（演示用）")
     ap.add_argument("--slow", type=float, default=0.0)
     ap.add_argument("--video", default=None)
     ap.add_argument("--shots", default=None)
@@ -240,7 +240,8 @@ def main():
             page = ctx.new_page()
         else:
             ctx = None
-            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            #page = browser.new_page(viewport={"width": 1280, "height": 800})
+            page= browser.new_page()
 
         page.goto(URL, wait_until="load", timeout=60000)
         page.wait_for_timeout(1500)

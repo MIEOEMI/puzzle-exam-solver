@@ -74,7 +74,7 @@ def parse_progress(txt: str):
         return int(a), int(b)
     except Exception:
         return 0, 0
-
+#转换数据格式
 
 def to_bgr(data_url: str):
     raw = base64.b64decode(data_url.split(",", 1)[1])
@@ -109,13 +109,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--part", type=int, default=3)
     ap.add_argument("--diff", type=int, default=25)
-    ap.add_argument("--headful", action="store_true")
+    ap.add_argument("--headful", action="store_true",default=True, help="弹窗口（演示用）")
     ap.add_argument("--slow", type=float, default=0.0, help="每步放慢秒数")
     ap.add_argument("--shots", default=None, help="截图输出目录")
     ap.add_argument("--max-seconds", type=float, default=300)
     ap.add_argument("--video", default=None, help="录屏目录（WebM），用于演示视频")
     ap.add_argument("--no-yolo", action="store_true", help="不加载 YOLO，只用 OpenCV")
     args = ap.parse_args()
+
+
+    #---------------------------------------------------------------处理传参
 
     rows = cols = int(round(args.diff ** 0.5))
     n_decoys = round(args.diff * 0.2) if args.part == 3 else 0
@@ -129,6 +132,8 @@ def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(channel="chrome", headless=not args.headful,
                                     args=["--no-sandbox", "--disable-dev-shm-usage"])
+
+        #-----------------------------------------------------------
         if args.video:
             vdir = Path(args.video)
             vdir.mkdir(parents=True, exist_ok=True)
@@ -140,6 +145,12 @@ def main():
         else:
             ctx = None
             page = browser.new_page(viewport={"width": 1280, "height": 800})
+
+
+        #-----------------------------------------------------------
+
+
+
         page.goto(URL, wait_until="load", timeout=60000)
         page.wait_for_timeout(1200)
 
