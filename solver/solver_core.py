@@ -187,7 +187,7 @@ class Analysis:
         y1 = min(self.ch, int(round(slot["y"] + self.ph)) + PAD)
         return self.canvas[y0:y1, x0:x1], (x0, y0)
 
-    def match_photo_pieces(self):
+    def match_photo_pieces(self, classifier=None, class_bonus=0.20):
         """照片块 vs 照片格 -> 全局最优指派。
 
         托盘有 30 块（25 真 + 5 诱饵），照片格有 20 个。
@@ -219,6 +219,22 @@ class Analysis:
                 sc, dx, dy = template_score(pad, cell["img"], self.pw, self.ph)
                 score[a, b] = sc
                 offs[a, b] = (dx, dy)
+
+        # YOLO 类别一致性：块与格同属一类时加分。
+        # 独立的语义约束，专门解决"两张照片内容相似"的混淆。
+        self.class_hits = 0
+        if classifier is not None:
+            cell_cls = [classifier.predict(c["img"], key=(c["row"], c["col"]))[0]
+                        for c in cells]
+            for a, i in enumerate(photo_slots):
+                slot = self.L["slots"][i]
+                crop = self.canvas[int(round(slot["y"])):int(round(slot["y"] + self.ph)),
+                                   int(round(slot["x"])):int(round(slot["x"] + self.pw))]
+                name = classifier.predict(crop, key=("piece", i))[0]
+                for b, cell_name in enumerate(cell_cls):
+                    if b < score.shape[1] and cell_name == name and score[a, b] > 0:
+                        score[a, b] += class_bonus
+                        self.class_hits += 1
 
         # 匈牙利求最小代价 -> 用 -score
         rows, cols = linear_sum_assignment(-score)

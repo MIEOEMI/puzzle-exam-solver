@@ -114,6 +114,7 @@ def main():
     ap.add_argument("--shots", default=None, help="截图输出目录")
     ap.add_argument("--max-seconds", type=float, default=300)
     ap.add_argument("--video", default=None, help="录屏目录（WebM），用于演示视频")
+    ap.add_argument("--no-yolo", action="store_true", help="不加载 YOLO，只用 OpenCV")
     args = ap.parse_args()
 
     rows = cols = int(round(args.diff ** 0.5))
@@ -164,9 +165,21 @@ def main():
             cv2.imwrite(str(shots / "01_start_canvas.png"), canvas)
         print(f"画布 {canvas.shape[1]}x{canvas.shape[0]}  参考图 {ref.shape[1]}x{ref.shape[0]}")
 
+        # ---- YOLO 分类器（可选：模型缺失时自动降级为纯 OpenCV）
+        classifier = None
+        if not args.no_yolo:
+            try:
+                from yolo_check import Classifier
+                classifier = Classifier()
+                print(f"YOLO 模型已加载: {classifier.path.name}（{len(classifier.names)} 类）")
+            except Exception as e:
+                print(f"[warn] YOLO 未启用，退回纯 OpenCV：{e}")
+
         # ---- 视觉分析
         A = Analysis(canvas, ref, rows, cols, n_decoys)
-        res = A.match_photo_pieces()
+        res = A.match_photo_pieces(classifier=classifier)
+        if classifier is not None:
+            print(f"YOLO 类别一致命中 {getattr(A, 'class_hits', 0)} 对（作为指派加分项）")
         print(f"白格 {len(A.white_cells)} 个: {[(c['row'], c['col']) for c in A.white_cells]}")
         print(f"白块 {len(res['white_slots'])} 个: {res['white_slots']}")
         print(f"照片映射 {len(res['assign'])} 个，诱饵 {len(res['decoys'])} 个: {res['decoys']}")
