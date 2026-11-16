@@ -41,7 +41,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from solver_core import compute_layout, drag
+from solver_core import compute_layout, drag, fg_mask
 
 URL_EXAM = "https://puzzle.moyunliuyin.me/?mode=exam"
 
@@ -144,6 +144,9 @@ def export(page, outdir=None, rows=5, cols=5, n_decoys=5):
         if x0 < 0 or y0 < 0 or x1 > canvas.shape[1] or y1 > canvas.shape[0]:
             continue
         crop = canvas[y0:y1, x0:x1].copy()
+        # 槽位比块多：棋盘外框能摆 32 个槽，实际只有 30 块，空槽位要跳过
+        if fg_mask(crop).mean() < 0.5:
+            continue
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
         h, w = crop.shape[:2]
         cc = hsv[int(h * .35):int(h * .65), int(w * .35):int(w * .65)]
