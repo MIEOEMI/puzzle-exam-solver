@@ -17,3 +17,5 @@ dataset/cls/
 # 用 tools/build_det_images.py 一条命令重建
 dataset/det/images/
 *.cache
+.vscode/
+tools/
