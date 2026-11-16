@@ -12,7 +12,7 @@
 | 要求 | 状态 |
 |---|---|
 | OpenCV 识别屏幕 | ✅ 布局复现、参考图切格、模板匹配、白块检测、齿型判定 |
-| YOLO 识别 | ✅ 自训 15 类模型（top1=1.000），**已接入指派打分**，每局 50+ 对命中 |
+| YOLO 识别 | ✅ 按提示自训 **YOLO11s 检测**（mAP50 0.989）+ 分类模型，**已接入指派打分**，每局 60+ 对命中 |
 | 代码模拟鼠标操作 | ✅ 真实鼠标事件（mousedown → mousemove → mouseup） |
 | Part 3 混合模式 | ✅ |
 | 5×5 难度 | ✅ 25 格 + 5 诱饵，稳定通关 |
@@ -112,47 +112,66 @@ def has_anchor(cell):
 
 ---
 
-## 四、YOLO 模型（自训）
+## 四、YOLO 模型（按考核提示自训：YOLO11s 检测）
 
-站点源码 `catalog.js` 的注释明确写道：
+考核方给出的题库类别提示写明：
+
+> 统一建议模型：**YOLO11s**
+> 预训练类直接用官方权重；非预训练类**在同一模型上用自建标注集微调**。
+
+站点源码 `catalog.js` 也注明了哪几类不在 COCO 里：
 
 > `practice: classes that are NOT in COCO. Stock weights cannot detect them,
-> so candidates need fine-tuning or an open-vocabulary model.
-> penguin, plus the two mascot sets tafei / nailong.`
+> so candidates need fine-tuning ... penguin, plus the two mascot sets tafei / nailong.`
 
-所以**必须自己训练**。我们构建了 15 类分类数据集：
+我们照这个口径做的：
 
-| 类别 | 数量 | 是否 COCO |
+| 类别 | 数量 | 来源 |
 |---|---|---|
-| dog / cat / elephant | 各 40 | ✅ |
-| desktop / bicycle / car / chair / cup / airplane / backpack / umbrella / suitcase | 各 20–40 | ✅ |
-| **penguin** | 39 | ❌ 需微调 |
-| **永雏塔菲 (tafei)** | 13 | ❌ 需微调 |
-| **奶龙 (nailong)** | 16 | ❌ 需微调 |
+| dog / cat / elephant | 各 40 | COCO 预训练，官方权重自动出框 |
+| desktop / bicycle / car / chair / cup / airplane / backpack / umbrella / suitcase | 各 20–40 | COCO 预训练（**desktop 按提示用 `tv` 近似**） |
+| **penguin** | 39 | ❌ 非 COCO → GrabCut 前景分割自动出框 |
+| **永雏塔菲 tafei** | 13 | ❌ 非 COCO → 同上 |
+| **奶龙 nailong** | 16 | ❌ 非 COCO → 同上 |
 
-- 总计 **388 张**，按 8:2 分层切分为 312 训练 + 76 验证
-- 模型：`yolov8n-cls`，224×224，60 epochs
-- 结果：**验证集 top1 = 1.000，top5 = 1.000**
+- 数据集：**388 张 → 312 训练 + 76 验证**，15 类，YOLO 检测格式（带标注框）
+- 标注：`tools/auto_label_det.py`（COCO 类用官方权重出框，非 COCO 类用 GrabCut，
+  抽检后统一外扩 5% 补边缘）
+- 训练：`tools/train_yolo11s.py`，`yolo11s`，416×416，40 epochs，CPU
+- **验证集：Precision 0.960 / Recall 0.942 / mAP50 0.989 / mAP50-95 0.859**
 
-模型文件：`models/puzzle_yolov8n_cls15.pt`（14 MB）
-数据集：`dataset/raw/<类别>/`（388 张，含 `manifest.json` 元信息）
+模型文件：`models/puzzle_yolo11s_det15.pt`（18 MB，已去掉优化器状态）
 
-### 模型怎么参与求解
+### 两个模型，各管一段
 
-YOLO 不是摆着看的，它直接进入指派决策：
+实测发现一个关键差别，因此分工：
 
-1. 对 20 个照片格逐个分类 → 得到每格属于哪一类
-2. 对 25 个照片块逐个分类 → 得到每块属于哪一类
-3. 匈牙利指派的代价矩阵里，**块与格类别一致时加 0.20 分**
+| 输入 | 是什么 | 用什么模型 | 实测 |
+|---|---|---|---|
+| **参考图切出的格子** | 完整物体（320×240） | **YOLO11s 检测** | 20/20 格检出 |
+| **托盘里的拼图块** | 局部碎片（81×60 裁片） | **YOLOv8n 分类** | 检测模型在碎片上会乱认 |
 
-这样就把「语义类别」这条独立证据和「像素相关度」结合起来，
-专门解决「两张照片内容相似、像素分数接近」的混淆。
-实测每局有 **50+ 对**类别一致命中参与打分。
+> 检测模型在碎片上失效是实测结论：32 个块里有 15 块被判成「奶龙」、11 块「杯子」——
+> 因为训练集里物体都占画面 70–90%，碎片不满足这个分布。
+> 而分类模型只看整块内容，反而稳。所以格子用检测、碎片用分类。
 
-关闭对比：`--no-yolo` 可只跑 OpenCV 路线。
+### 怎么参与求解
 
-> 分工说明：**OpenCV** 负责几何（布局复现、切格、模板匹配、白块齿型），
-> **YOLO** 负责语义（类别识别），两者在同一个代价矩阵里共同决定位置。
+1. 20 个参考格用**检测模型**打类别（完整物体，可靠）
+2. 25 个拼图块用**分类模型**打类别
+3. 匈牙利代价矩阵里，**块与格类别一致时 +0.20**，与像素相关度共同决定位置
+
+实测每局 **60+ 对**类别一致命中参与打分。
+
+### 鲁棒性：YOLO 缺席也能解
+
+`--no-yolo` 可完全关掉 YOLO。**实测纯 OpenCV 仍 25/25（29.8 秒）**——
+YOLO 是加分项和语义校验，不在解题关键路径上，模型出问题也不会导致解不出来。
+
+| 配置 | 结果 | 用时 |
+|---|---|---|
+| OpenCV + YOLO11s 检测 + 分类 | 25/25 | 29.1s |
+| 纯 OpenCV（`--no-yolo`） | 25/25 | 29.8s |
 
 ---
 
@@ -230,13 +249,17 @@ shots/04_page.png           整页截图
 │   └── layout.py         布局几何（独立可验证版）
 ├── tools/
 │   ├── download_catalog.py   下载站点 388 张素材
-│   ├── build_cls_dataset.py  切分 train/val
-│   └── train_yolo.py         训练 YOLOv8 分类模型
+│   ├── auto_label_det.py     自动生成检测标注（官方权重 + GrabCut）
+│   ├── build_det_images.py   从 raw 重建检测集图片（图片不入库）
+│   ├── train_yolo11s.py      训练 YOLO11s 检测模型
+│   ├── build_cls_dataset.py  切分分类数据集
+│   └── train_yolo.py         训练分类模型
 ├── dataset/
 │   ├── raw/<class>/*.jpg     388 张训练素材
 │   └── manifest.json         类别与文件清单
 ├── models/
-│   └── puzzle_yolov8n_cls15.pt   训练好的模型
+│   ├── puzzle_yolo11s_det15.pt   YOLO11s 检测模型（18MB，主力）
+│   └── puzzle_yolov8n_cls15.pt   分类模型（碎片用）
 ├── demo/
 │   ├── demo_part3_5x5.mp4    演示视频（25/25 通关）
 │   └── screenshots/          过程截图
@@ -259,5 +282,8 @@ shots/04_page.png           整页截图
 
 ## 九、许可与声明
 
-本项目为 RoboMaster 队内 CV 练习用途，站点素材版权归原站所有，
-数据集仅用于本次考核的模型训练，不再分发。
+本项目为本次 CV 考核的解题实现。
+
+`dataset/` 下的素材版权归考核站点所有，收录进仓库的唯一目的是让评委能够
+**复现模型训练过程**（`tools/auto_label_det.py` → `tools/train_yolo11s.py`），
+不作其他用途。若原作者有异议，可删除该目录并按 `tools/download_catalog.py` 重新拉取。

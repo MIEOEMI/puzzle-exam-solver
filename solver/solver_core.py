@@ -191,7 +191,8 @@ class Analysis:
         y1 = min(self.ch, int(round(slot["y"] + self.ph)) + PAD)
         return self.canvas[y0:y1, x0:x1], (x0, y0)
 
-    def match_photo_pieces(self, classifier=None, class_bonus=0.20):
+    def match_photo_pieces(self, classifier=None, class_bonus=0.20,
+                           cell_classifier=None):
         """照片块 vs 照片格 -> 全局最优指派。
 
         托盘有 30 块（25 真 + 5 诱饵），照片格有 20 个。
@@ -226,15 +227,20 @@ class Analysis:
 
         # YOLO 类别一致性：块与格同属一类时加分。
         # 独立的语义约束，专门解决"两张照片内容相似"的混淆。
+        # 类别来源分工：
+        #   格子是**完整物体**（参考图切出来的 320×240）-> 用检测模型，准确
+        #   拼图块是**局部碎片**（几十像素的裁片）-> 检测模型会乱认，用分类模型
         self.class_hits = 0
-        if classifier is not None:
-            cell_cls = [classifier.predict(c["img"], key=(c["row"], c["col"]))[0]
+        if classifier is not None or cell_classifier is not None:
+            cclf = cell_classifier or classifier
+            pclf = classifier or cell_classifier
+            cell_cls = [cclf.predict(c["img"], key=(c["row"], c["col"]))[0]
                         for c in cells]
             for a, i in enumerate(photo_slots):
                 slot = self.L["slots"][i]
                 crop = self.canvas[int(round(slot["y"])):int(round(slot["y"] + self.ph)),
                                    int(round(slot["x"])):int(round(slot["x"] + self.pw))]
-                name = classifier.predict(crop, key=("piece", i))[0]
+                name = pclf.predict(crop, key=("piece", i))[0]
                 for b, cell_name in enumerate(cell_cls):
                     if b < score.shape[1] and cell_name == name and score[a, b] > 0:
                         score[a, b] += class_bonus

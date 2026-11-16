@@ -165,19 +165,34 @@ def main():
             cv2.imwrite(str(shots / "01_start_canvas.png"), canvas)
         print(f"画布 {canvas.shape[1]}x{canvas.shape[0]}  参考图 {ref.shape[1]}x{ref.shape[0]}")
 
-        # ---- YOLO 分类器（可选：模型缺失时自动降级为纯 OpenCV）
-        classifier = None
+        # ---- YOLO（可选：模型缺失时自动降级为纯 OpenCV）
+        # 分工：检测模型（YOLO11s）管**格子**——格子里是完整物体，实测 20/20 检出；
+        #      分类模型管**拼图块**——块是局部碎片，检测模型会乱认。
+        classifier = None          # 拼图块用
+        cell_classifier = None     # 参考格用
         if not args.no_yolo:
             try:
                 from yolo_check import Classifier
-                classifier = Classifier()
-                print(f"YOLO 模型已加载: {classifier.path.name}（{len(classifier.names)} 类）")
+                from yolo_check import DET_WEIGHTS, CLS_WEIGHTS
+                if DET_WEIGHTS.exists():
+                    cell_classifier = Classifier(weights=DET_WEIGHTS)
+                    print(f"YOLO 检测模型（格子）: {cell_classifier.path.name}"
+                          f"（{len(cell_classifier.names)} 类）")
+                if CLS_WEIGHTS.exists():
+                    classifier = Classifier(weights=CLS_WEIGHTS)
+                    print(f"YOLO 分类模型（碎片）: {classifier.path.name}"
+                          f"（{len(classifier.names)} 类）")
+                if classifier is None:
+                    classifier = cell_classifier
+                if cell_classifier is None:
+                    cell_classifier = classifier
             except Exception as e:
                 print(f"[warn] YOLO 未启用，退回纯 OpenCV：{e}")
 
         # ---- 视觉分析
         A = Analysis(canvas, ref, rows, cols, n_decoys)
-        res = A.match_photo_pieces(classifier=classifier)
+        res = A.match_photo_pieces(classifier=classifier,
+                                   cell_classifier=cell_classifier)
         if classifier is not None:
             print(f"YOLO 类别一致命中 {getattr(A, 'class_hits', 0)} 对（作为指派加分项）")
         print(f"白格 {len(A.white_cells)} 个: {[(c['row'], c['col']) for c in A.white_cells]}")
