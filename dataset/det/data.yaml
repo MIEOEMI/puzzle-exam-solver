@@ -1,0 +1,19 @@
+path: .
+train: images/train
+val: images/val
+names:
+  0: dog
+  1: cat
+  2: elephant
+  3: desktop
+  4: bicycle
+  5: car
+  6: chair
+  7: cup
+  8: airplane
+  9: backpack
+  10: umbrella
+  11: suitcase
+  12: penguin
+  13: tafei
+  14: nailong

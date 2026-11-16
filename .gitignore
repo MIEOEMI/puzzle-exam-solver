@@ -2,7 +2,18 @@ __pycache__/
 *.pyc
 venv/
 runs/
-dataset/cls/
 shots/
 video_out/
 *.webm
+
+# 预训练权重由 ultralytics 自动下载，不入库
+yolo11s.pt
+yolov8n.pt
+
+# 分类数据集可从 tools/build_cls_dataset.py 重新生成
+dataset/cls/
+
+# 检测数据集的图片是 dataset/raw 的副本（省仓库体积），
+# 用 tools/build_det_images.py 一条命令重建
+dataset/det/images/
+*.cache

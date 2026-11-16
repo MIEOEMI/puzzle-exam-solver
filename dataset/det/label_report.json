@@ -1,0 +1,77 @@
+{
+ "dog": {
+  "pretrained": 40,
+  "grabcut": 0,
+  "center": 0
+ },
+ "cat": {
+  "pretrained": 38,
+  "grabcut": 0,
+  "center": 2
+ },
+ "elephant": {
+  "pretrained": 40,
+  "grabcut": 0,
+  "center": 0
+ },
+ "desktop": {
+  "pretrained": 18,
+  "grabcut": 0,
+  "center": 22
+ },
+ "bicycle": {
+  "pretrained": 18,
+  "grabcut": 0,
+  "center": 2
+ },
+ "car": {
+  "pretrained": 17,
+  "grabcut": 0,
+  "center": 3
+ },
+ "chair": {
+  "pretrained": 19,
+  "grabcut": 0,
+  "center": 1
+ },
+ "cup": {
+  "pretrained": 19,
+  "grabcut": 0,
+  "center": 1
+ },
+ "airplane": {
+  "pretrained": 20,
+  "grabcut": 0,
+  "center": 0
+ },
+ "backpack": {
+  "pretrained": 5,
+  "grabcut": 0,
+  "center": 15
+ },
+ "umbrella": {
+  "pretrained": 19,
+  "grabcut": 0,
+  "center": 1
+ },
+ "suitcase": {
+  "pretrained": 20,
+  "grabcut": 0,
+  "center": 0
+ },
+ "penguin": {
+  "pretrained": 0,
+  "grabcut": 39,
+  "center": 0
+ },
+ "tafei": {
+  "pretrained": 0,
+  "grabcut": 13,
+  "center": 0
+ },
+ "nailong": {
+  "pretrained": 0,
+  "grabcut": 16,
+  "center": 0
+ }
+}
