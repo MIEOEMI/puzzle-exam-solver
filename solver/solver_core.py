@@ -403,6 +403,10 @@ def anchor_order(assign):
     placed = set()
     remaining = dict(assign)
     order = []
+    if not assign:
+        # 一个照片块都没匹配上（例如 Part2 全是白块）时不能崩，
+        # 交给调用方跳过照片阶段
+        return []
     rows = max(a["row"] for a in assign.values()) + 1
     cols = max(a["col"] for a in assign.values()) + 1
 
