@@ -152,20 +152,32 @@ def main():
 
 
         page.goto(URL, wait_until="load", timeout=60000)
-        page.wait_for_timeout(1200)
+        page.wait_for_timeout(2500)      # 站点脚本初始化较慢，等够再点
 
-        nxt = page.evaluate(JS_SWITCH)
-        page.wait_for_timeout(400)
-        r = page.evaluate(JS_START, [args.part, args.diff])
-        print(f"开局: part={args.part} diff={args.diff} rows={rows} decoys={n_decoys} -> {r}")
-
-        # 等块铺好
-        for _ in range(60):
-            page.wait_for_timeout(200)
-            cur, tot = parse_progress(page.evaluate(JS_PROGRESS))
+        # 稳健开局：点「开始这一部分」后必须看到进度变成 0/diff，否则重试。
+        # 之前只等 1.2s 就点，点空了却继续跑，结果拿着上一局的 9 格棋盘去分析，
+        # 表现为"一块都找不到 / 结果 0/N"。
+        r = None
+        cur = tot = 0
+        for attempt in range(4):
+            page.evaluate(JS_SWITCH)
+            page.wait_for_timeout(800)
+            r = page.evaluate(JS_START, [args.part, args.diff])
+            for _ in range(50):                      # 最多等 10s
+                page.wait_for_timeout(200)
+                cur, tot = parse_progress(page.evaluate(JS_PROGRESS))
+                if tot == args.diff:
+                    break
             if tot == args.diff:
                 break
-        page.wait_for_timeout(600)
+            print(f"[重试 {attempt+1}] 开局未生效（进度 {cur}/{tot}，期望 0/{args.diff}）")
+        if tot != args.diff:
+            raise RuntimeError(
+                f"开局失败：进度 {cur}/{tot}，期望 0/{args.diff}"
+                f"（part={args.part} diff={args.diff} 返回值 {r}）")
+
+        page.wait_for_timeout(700)
+        print(f"开局: part={args.part} diff={args.diff} rows={rows} decoys={n_decoys} -> {r}")
         print(f"就绪: 进度 {page.evaluate(JS_PROGRESS)}")
 
         rect = json.loads(page.evaluate(JS_CANVAS_RECT))
@@ -338,7 +350,10 @@ def main():
         print(f"\n=== 结果 {cur}/{tot} | 用时 {elapsed}s | "
               f"{'🎉 通关' if cur == tot else '未完成'} ===")
         if args.headful:
-            input("按回车关闭浏览器…")
+            try:
+                input("按回车关闭…")
+            except EOFError:
+                pass
         if ctx is not None:
             page.close()          # 关页面才会落盘视频
             ctx.close()
