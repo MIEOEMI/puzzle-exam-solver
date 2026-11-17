@@ -151,7 +151,14 @@ def main():
 
 
 
-        page.goto(URL, wait_until="load", timeout=60000)
+        # 站点偶尔很慢，goto 也可能超时，重试几次
+        for gi in range(3):
+            try:
+                page.goto(URL, wait_until="load", timeout=45000)
+                break
+            except Exception as e:
+                print(f"[goto 重试 {gi+1}] {type(e).__name__}")
+                page.wait_for_timeout(2000)
         page.wait_for_timeout(2500)      # 站点脚本初始化较慢，等够再点
 
         # 稳健开局：点「开始这一部分」后必须看到进度变成 0/diff，否则重试。
@@ -176,9 +183,20 @@ def main():
                 f"开局失败：进度 {cur}/{tot}，期望 0/{args.diff}"
                 f"（part={args.part} diff={args.diff} 返回值 {r}）")
 
+        # 等画布真正绘制出来再分析。
+        # 实测开局后画布会有几秒钟是全黑（均值 0.0），此时分析会得到"一块都找不到"。
+        canvas = None
+        for wi in range(50):                 # 最多等 15s
+            page.wait_for_timeout(300)
+            canvas = to_bgr(page.evaluate(JS_CANVAS_PNG))
+            if float(canvas.mean()) > 5:
+                break
+        else:
+            raise RuntimeError("画布一直空白（均值≈0），站点可能没渲染完成")
         page.wait_for_timeout(700)
+        canvas = to_bgr(page.evaluate(JS_CANVAS_PNG))
         print(f"开局: part={args.part} diff={args.diff} rows={rows} decoys={n_decoys} -> {r}")
-        print(f"就绪: 进度 {page.evaluate(JS_PROGRESS)}")
+        print(f"就绪: 进度 {page.evaluate(JS_PROGRESS)}  画布均值 {canvas.mean():.1f}")
 
         rect = json.loads(page.evaluate(JS_CANVAS_RECT))
         canvas = to_bgr(page.evaluate(JS_CANVAS_PNG))
