@@ -135,9 +135,9 @@ def grab_here(page, rect, cv, gx, gy, probe=12):
     与其猜"什么点算命中"，不如按下后试探一下，没抓住就换下一个点。
     """
     px0 = cv[gy, gx].astype(int)
-    page.mouse.move(rect["left"] + gx, rect["top"] + gy)
+    page.mouse.move(*css_xy(rect, gx, gy))
     page.mouse.down()
-    page.mouse.move(rect["left"] + gx + probe, rect["top"] + gy + probe, steps=4)
+    page.mouse.move(*css_xy(rect, gx + probe, gy + probe), steps=4)
     time.sleep(0.05)
     after = to_bgr(page.evaluate(JS_PNG))
     px1 = after[gy, gx].astype(int)
@@ -253,6 +253,11 @@ def main():
 
         rect = json.loads(page.evaluate(JS_RECT))
         canvas = to_bgr(page.evaluate(JS_PNG))
+        rect["sx"] = rect["w"] / canvas.shape[1]
+        rect["sy"] = rect["h"] / canvas.shape[0]
+        if abs(rect["sx"] - 1) > 0.01 or abs(rect["sy"] - 1) > 0.01:
+            print(f"[DPR] 画布 {canvas.shape[1]}x{canvas.shape[0]} -> "
+                  f"CSS {rect['w']:.0f}x{rect['h']:.0f} sx={rect['sx']:.3f} sy={rect['sy']:.3f}")
         ref = to_bgr(json.loads(page.evaluate(JS_REF))["src"])
 
         # 重叠/居中开局没有托盘槽位，棋盘按满尺寸
@@ -318,7 +323,7 @@ def main():
                 break
             gx, gy = grabbed
             # 已经按住并偏移了 12px，直接拖到暂存台
-            page.mouse.move(rect["left"] + stage[0], rect["top"] + stage[1], steps=12)
+            page.mouse.move(*css_xy(rect, stage[0], stage[1]), steps=12)
             page.mouse.up()
             time.sleep(0.12)
             cur2, _ = parse_progress(page.evaluate(JS_PROGRESS))
@@ -336,8 +341,8 @@ def main():
                 for wc in [c for c in white_cells if c not in placed and anchor_ok(c)]:
                     wx, wy = cell_centre(wc)
                     c0, _ = parse_progress(page.evaluate(JS_PROGRESS))
-                    drag(page, rect["left"] + stage[0], rect["top"] + stage[1],
-                         rect["left"] + wx, rect["top"] + wy, delay=args.slow)
+                    drag(page, *css_xy(rect, stage[0], stage[1]),
+                         *css_xy(rect, wx, wy), delay=args.slow)
                     time.sleep(0.10)
                     c1, _ = parse_progress(page.evaluate(JS_PROGRESS))
                     if c1 > c0:
@@ -345,15 +350,15 @@ def main():
                         print(f"    白块 → {wc} ✅ {c1}/{tot}")
                         done = True
                         break
-                    drag(page, rect["left"] + wx, rect["top"] + wy,
-                         rect["left"] + stage[0], rect["top"] + stage[1], delay=args.slow)
+                    drag(page, *css_xy(rect, wx, wy),
+                         *css_xy(rect, stage[0], stage[1]), delay=args.slow)
                     time.sleep(0.06)
                 if not done:
                     # 还没到能放的时候，先停在棋盘角上让出暂存台
                     px_ = bx + 14 + len(white_park) * 10
                     py_ = by + bh - 14
-                    drag(page, rect["left"] + stage[0], rect["top"] + stage[1],
-                         rect["left"] + px_, rect["top"] + py_, delay=args.slow)
+                    drag(page, *css_xy(rect, stage[0], stage[1]),
+                         *css_xy(rect, px_, py_), delay=args.slow)
                     white_park.append((px_, py_))
                     print(f"    白块暂存到 ({px_:.0f},{py_:.0f})")
                 continue
@@ -361,8 +366,8 @@ def main():
             cx_t, cy_t = cell_centre(cell)
             # 从暂存台上这块的**真实中心**抓起来，落到格心，偏移正好为 0
             gx2, gy2 = loc if loc is not None else (stage[0], stage[1])
-            drag(page, rect["left"] + gx2, rect["top"] + gy2,
-                 rect["left"] + cx_t, rect["top"] + cy_t, delay=args.slow)
+            drag(page, *css_xy(rect, gx2, gy2),
+                 *css_xy(rect, cx_t, cy_t), delay=args.slow)
             time.sleep(0.12)
             cur3, _ = parse_progress(page.evaluate(JS_PROGRESS))
             remaining.discard(cell)
@@ -382,11 +387,11 @@ def main():
             sx, sy = staged.pop(cell)
             cur, tot = parse_progress(page.evaluate(JS_PROGRESS))
             # 拿起来晃一下再放下，触发重新判定锚点
-            drag(page, rect["left"] + sx, rect["top"] + sy,
-                 rect["left"] + sx + 6, rect["top"] + sy + 6)
+            drag(page, *css_xy(rect, sx, sy),
+                 *css_xy(rect, sx + 6, sy + 6))
             time.sleep(0.08)
-            drag(page, rect["left"] + sx + 6, rect["top"] + sy + 6,
-                 rect["left"] + sx, rect["top"] + sy)
+            drag(page, *css_xy(rect, sx + 6, sy + 6),
+                 *css_xy(rect, sx, sy))
             time.sleep(0.12)
             cur2, _ = parse_progress(page.evaluate(JS_PROGRESS))
             if cur2 > cur:
@@ -425,14 +430,14 @@ def main():
             before = cur
             sx, sy = rect["left"] + b["cx"], rect["top"] + b["cy"]
             tx, ty = cell_centre(cell)
-            drag(page, sx, sy, rect["left"] + tx, rect["top"] + ty, delay=args.slow)
+            drag(page, sx, sy, *css_xy(rect, tx, ty), delay=args.slow)
             time.sleep(0.10)
             cur, tot = parse_progress(page.evaluate(JS_PROGRESS))
             if cur > before:
                 placed.add(cell)
                 print(f"  白块 ({b['cx']:.0f},{b['cy']:.0f}) → {cell} ✅ {cur}/{tot}")
             else:
-                drag(page, rect["left"] + tx, rect["top"] + ty, sx, sy, delay=args.slow)
+                drag(page, *css_xy(rect, tx, ty), sx, sy, delay=args.slow)
                 white_cells.append(white_cells.pop(0))
                 print(f"  白块 ({b['cx']:.0f},{b['cy']:.0f}) 试 {cell} ✗（已拖回）")
 

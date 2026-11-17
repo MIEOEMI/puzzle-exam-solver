@@ -100,12 +100,23 @@ def drag(page, sx, sy, tx, ty, steps=12, delay=0.0):
     page.mouse.up()
 
 
+def css_xy(rect, x, y):
+    """画布像素坐标 -> 页面 CSS 坐标。
+
+    为什么必须换算：canvas.width/height 不一定等于 CSS 尺寸。
+    Windows 125%/150% 缩放、Retina、浏览器缩放都会让内部像素更大，
+    直接拿画布像素当页面坐标去点，落点整体偏移，表现就是「一块都拼不上」。
+    """
+    return (rect["left"] + x * rect.get("sx", 1.0),
+            rect["top"] + y * rect.get("sy", 1.0))
+
+
 def drop_piece(page, rect, L, slot, cell, jitter=(0, 0), slow=0.0):
     pw, ph = L["piece"]["w"], L["piece"]["h"]
-    sx = rect["left"] + slot["x"] + jitter[0] + pw / 2
-    sy = rect["top"] + slot["y"] + jitter[1] + ph / 2
-    tx = rect["left"] + L["board"]["x"] + cell[1] * pw + pw / 2
-    ty = rect["top"] + L["board"]["y"] + cell[0] * ph + ph / 2
+    sx, sy = css_xy(rect, slot["x"] + jitter[0] + pw / 2,
+                    slot["y"] + jitter[1] + ph / 2)
+    tx, ty = css_xy(rect, L["board"]["x"] + cell[1] * pw + pw / 2,
+                    L["board"]["y"] + cell[0] * ph + ph / 2)
     drag(page, sx, sy, tx, ty, delay=slow)
     time.sleep(0.08 if not slow else slow + 0.05)
 
@@ -125,6 +136,8 @@ def main():
     # 窗口大小会改变画布尺寸（1280x800 -> 919x653；1600x1000 -> 1159x853）。
     # 默认保持 1280x800：这是实测 25/25 稳定的配置。
     # 更大的窗口画布更大、匹配分数更高，但实测落子全失败（坐标缩放待查），不要默认开。
+    ap.add_argument("--dpr", type=float, default=1.0,
+                    help="设备像素比，Windows 125%%/150%% 缩放可试 1.25/1.5 复现")
     ap.add_argument("--vw", type=int, default=1280, help="窗口宽")
     ap.add_argument("--vh", type=int, default=800, help="窗口高")
     args = ap.parse_args()
@@ -151,12 +164,14 @@ def main():
             vdir.mkdir(parents=True, exist_ok=True)
             ctx = browser.new_context(
                 viewport={"width": args.vw, "height": args.vh},
+                device_scale_factor=args.dpr,
                 record_video_dir=str(vdir),
                 record_video_size={"width": args.vw, "height": args.vh})
             page = ctx.new_page()
         else:
             ctx = None
-            page = browser.new_page(viewport={"width": args.vw, "height": args.vh})
+            page = browser.new_page(viewport={"width": args.vw, "height": args.vh},
+                                    device_scale_factor=args.dpr)
 
 
         #-----------------------------------------------------------
@@ -223,6 +238,12 @@ def main():
 
         rect = json.loads(page.evaluate(JS_CANVAS_RECT))
         canvas = to_bgr(page.evaluate(JS_CANVAS_PNG))
+        # 画布内部像素 vs CSS 像素（高 DPI / 浏览器缩放时不等）
+        rect["sx"] = rect["w"] / canvas.shape[1]
+        rect["sy"] = rect["h"] / canvas.shape[0]
+        if abs(rect["sx"] - 1) > 0.01 or abs(rect["sy"] - 1) > 0.01:
+            print(f"[DPR] 画布 {canvas.shape[1]}x{canvas.shape[0]} -> "
+                  f"CSS {rect['w']:.0f}x{rect['h']:.0f}，坐标换算 sx={rect['sx']:.3f} sy={rect['sy']:.3f}")
         refinfo = json.loads(page.evaluate(JS_REF))
         ref = to_bgr(refinfo["src"])
         if shots:
@@ -288,10 +309,9 @@ def main():
                 loc = locate_piece(cv_now, cell_img[cell], pw, ph, L)
                 if not loc:
                     break
-                sx = rect["left"] + loc["cx"]
-                sy = rect["top"] + loc["cy"]
-                tx = rect["left"] + L["board"]["x"] + cell[1] * pw + pw / 2
-                ty = rect["top"] + L["board"]["y"] + cell[0] * ph + ph / 2
+                sx, sy = css_xy(rect, loc["cx"], loc["cy"])
+                tx, ty = css_xy(rect, L["board"]["x"] + cell[1] * pw + pw / 2,
+                                L["board"]["y"] + cell[0] * ph + ph / 2)
                 drag(page, sx, sy, tx, ty, delay=args.slow)
                 time.sleep(0.10)
                 after = parse_progress(page.evaluate(JS_PROGRESS))[0]
@@ -362,10 +382,9 @@ def main():
                 loc = locate_piece_white(cv, L, pw, ph, slots[i])
                 if loc is None:
                     continue
-                sx = rect["left"] + loc["cx"]
-                sy = rect["top"] + loc["cy"]
-                tx = rect["left"] + L["board"]["x"] + cell[1] * pw + pw / 2
-                ty = rect["top"] + L["board"]["y"] + cell[0] * ph + ph / 2
+                sx, sy = css_xy(rect, loc["cx"], loc["cy"])
+                tx, ty = css_xy(rect, L["board"]["x"] + cell[1] * pw + pw / 2,
+                                L["board"]["y"] + cell[0] * ph + ph / 2)
                 before = cur
                 drag(page, sx, sy, tx, ty, delay=args.slow)
                 time.sleep(0.10)
@@ -376,8 +395,8 @@ def main():
                 else:
                     print(f"  白块#{i} 试 {cell} ✗")
                     # 送回原槽位，避免落到棋盘上"消失"
-                    park_x = rect["left"] + slots[i]["x"] + pw / 2
-                    park_y = rect["top"] + slots[i]["y"] + ph / 2
+                    park_x, park_y = css_xy(rect, slots[i]["x"] + pw / 2,
+                                            slots[i]["y"] + ph / 2)
                     drag(page, tx, ty, park_x, park_y, delay=0)
                     time.sleep(0.06)
             white_cells = []

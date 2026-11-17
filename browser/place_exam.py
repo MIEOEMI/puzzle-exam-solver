@@ -140,6 +140,9 @@ def export(page, outdir=None, rows=5, cols=5, n_decoys=5):
     """
     rect = json.loads(page.evaluate(JS_RECT))
     canvas = to_bgr(page.evaluate(JS_PNG))
+    # 画布内部像素 vs CSS 像素（高 DPI 时不等，坐标必须换算）
+    rect["sx"] = rect["w"] / canvas.shape[1]
+    rect["sy"] = rect["h"] / canvas.shape[0]
     ref_info = json.loads(page.evaluate(JS_REF))
     ref = to_bgr(ref_info["src"]) if ref_info.get("src") else None
 
@@ -213,6 +216,12 @@ class PlanError(ValueError):
     """plan 格式/取值错误。与"算法猜错"区分开。"""
 
 
+def css_xy(rect, x, y):
+    """画布像素坐标 -> 页面 CSS 坐标（处理高 DPI / 浏览器缩放）。"""
+    return (rect["left"] + x * rect.get("sx", 1.0),
+            rect["top"] + y * rect.get("sy", 1.0))
+
+
 def place(page, plan, pieces, layout, rect, delay=0.10, verbose=True):
     """按 plan 把块拖到格子，自动遵守锚点规则（从外圈往内）。
 
@@ -245,10 +254,8 @@ def place(page, plan, pieces, layout, rect, delay=0.10, verbose=True):
         k, (r, c) = ready[0]
         p = by_index[k]
         cur, tot = parse_progress(page.evaluate(JS_PROGRESS))
-        sx = rect["left"] + p["x"] + p["w"] / 2
-        sy = rect["top"] + p["y"] + p["h"] / 2
-        tx = rect["left"] + bx + c * pw + pw / 2
-        ty = rect["top"] + by + r * ph + ph / 2
+        sx, sy = css_xy(rect, p["x"] + p["w"] / 2, p["y"] + p["h"] / 2)
+        tx, ty = css_xy(rect, bx + c * pw + pw / 2, by + r * ph + ph / 2)
         drag(page, sx, sy, tx, ty)
         time.sleep(max(delay, 0.10))
         cur2, tot = parse_progress(page.evaluate(JS_PROGRESS))
