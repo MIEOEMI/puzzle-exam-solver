@@ -247,24 +247,38 @@ shots/04_page.png           整页截图
 
 ## 七、文件结构
 
+运行器在仓库根目录，**求解器**与**浏览器驱动**是平级的两个包：
+
 ```
 .
-├── solver/
-│   ├── run_exam.py       主流程：开局 → 分析 → 落子 → 校验
-│   ├── solver_core.py    布局复现、块分类、匈牙利指派、锚点排序、拖拽
-│   ├── white_shape.py    白块齿型判定、白格齿型探测
-│   ├── yolo_check.py     YOLO 分类器封装（15 类）
-│   ├── run_overlap.py    附加题：重叠 / 居中开局（先摊开再识别）
-│   └── layout.py         布局几何（独立可验证版）
-├── tools/
+├── run_basic.py              基础题入口（Part1/2/3 × 9/16/25）
+├── run_bonus_overlap.py      附加题入口 A：初始重叠
+├── run_bonus_center.py       附加题入口 B：初始居中
+├── run_overlap_matrix.py     附加题批量：多难度 × 多轮 + 间隔
+│
+├── solver/                   求解器（不含浏览器操作）
+│   ├── solver_core.py        布局复现、块分类、匈牙利指派、锚点排序
+│   ├── run_exam.py           基础题主流程实现
+│   ├── run_overlap.py        附加题实现（堆叠剥离 + 暂存识别）
+│   ├── white_shape.py        白块齿型判定
+│   ├── yolo_check.py         YOLO 封装（检测/分类双模型）
+│   └── layout.py             布局几何（独立可验证版）
+│
+├── browser/                  浏览器驱动（只做页面操作，不含算法）
+│   ├── place_exam.py         open_exam / export / place / state
+│   └── test_place_exam.py    端到端自测
+│
+├── tools/                    数据集与模型的可复现脚本
 │   ├── download_catalog.py   下载站点 388 张素材
 │   ├── auto_label_det.py     自动生成检测标注（官方权重 + GrabCut）
 │   ├── build_det_images.py   从 raw 重建检测集图片（图片不入库）
 │   ├── train_yolo11s.py      训练 YOLO11s 检测模型
 │   ├── build_cls_dataset.py  切分分类数据集
 │   └── train_yolo.py         训练分类模型
+│
 ├── dataset/
 │   ├── raw/<class>/*.jpg     388 张训练素材
+│   ├── det/labels/           388 个检测标注（YOLO 格式）
 │   └── manifest.json         类别与文件清单
 ├── models/
 │   ├── puzzle_yolo11s_det15.pt   YOLO11s 检测模型（18MB，主力）
@@ -274,7 +288,29 @@ shots/04_page.png           整页截图
 │   └── screenshots/          过程截图
 └── docs/
     ├── site-mechanics.md        站点机制分析
+    ├── RESULTS_matrix.md        9 组合实测成绩
     └── BONUS_overlap_center.md  附加题：做法、实测、难点
+```
+
+### 导入关系
+
+运行器在根目录，靠一行 `sys.path` 注入找到 `solver/`：
+
+```python
+# run_basic.py / run_bonus_*.py
+sys.path.insert(0, str(Path(__file__).resolve().parent / "solver"))
+```
+
+浏览器驱动在 `browser/`，同样注入同级 `solver/`，且**必须写在 `from solver_core import ...` 之前**：
+
+```python
+# browser/place_exam.py
+from __future__ import annotations
+import sys
+from pathlib import Path as _P
+sys.path.insert(0, str(_P(__file__).resolve().parent.parent / "solver"))
+...
+from solver_core import compute_layout, drag, fg_mask
 ```
 
 ---

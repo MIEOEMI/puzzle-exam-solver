@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-RUNNER = HERE / "run_overlap.py"
+RUNNER = HERE / "solver" / "run_overlap.py"
 
 
 def parse_diffs(s: str) -> list[int]:

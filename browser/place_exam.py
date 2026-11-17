@@ -33,6 +33,13 @@
 """
 from __future__ import annotations
 
+import sys
+from pathlib import Path as _P
+
+# 浏览器驱动位于仓库根下的 browser/，求解器实现在同级 solver/
+# 必须在 import solver_core 之前注入路径，否则模块找不到
+sys.path.insert(0, str(_P(__file__).resolve().parent.parent / "solver"))
+
 import base64
 import json
 import time
@@ -42,6 +49,8 @@ import cv2
 import numpy as np
 
 from solver_core import compute_layout, drag, fg_mask
+
+
 
 URL_EXAM = "https://puzzle.moyunliuyin.me/?mode=exam"
 

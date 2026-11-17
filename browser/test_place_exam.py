@@ -1,7 +1,8 @@
 """place_exam 的端到端自测：开局 -> 导出 -> 用求解器出 plan -> 落子 -> 读进度。"""
 import json, sys, time
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))          # browser/
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'solver'))  # solver/
 
 from playwright.sync_api import sync_playwright
 from place_exam import open_exam, export, place, state
