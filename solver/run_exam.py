@@ -63,6 +63,13 @@ JS_START = """([part, diff]) => {
   return 'ok';
 }"""
 
+JS_START_READY = """() => {
+  const b = document.getElementById('btn-exam-start');
+  if (!b) return JSON.stringify({ok: false, why: 'no-button'});
+  const t = (b.innerText || '').trim();
+  return JSON.stringify({ok: !b.disabled && t.includes('开始'), text: t, disabled: b.disabled});
+}"""
+
 JS_SWITCH = """() => { const b = document.getElementById('btn-exam-switch');
   if (b) { b.click(); return 'switch'; } return 'none'; }"""
 
@@ -115,6 +122,11 @@ def main():
     ap.add_argument("--max-seconds", type=float, default=300)
     ap.add_argument("--video", default=None, help="录屏目录（WebM），用于演示视频")
     ap.add_argument("--no-yolo", action="store_true", help="不加载 YOLO，只用 OpenCV")
+    # 窗口大小会改变画布尺寸（1280x800 -> 919x653；1600x1000 -> 1159x853）。
+    # 默认保持 1280x800：这是实测 25/25 稳定的配置。
+    # 更大的窗口画布更大、匹配分数更高，但实测落子全失败（坐标缩放待查），不要默认开。
+    ap.add_argument("--vw", type=int, default=1280, help="窗口宽")
+    ap.add_argument("--vh", type=int, default=800, help="窗口高")
     args = ap.parse_args()
 
 
@@ -138,13 +150,13 @@ def main():
             vdir = Path(args.video)
             vdir.mkdir(parents=True, exist_ok=True)
             ctx = browser.new_context(
-                viewport={"width": 1280, "height": 800},
+                viewport={"width": args.vw, "height": args.vh},
                 record_video_dir=str(vdir),
-                record_video_size={"width": 1280, "height": 800})
+                record_video_size={"width": args.vw, "height": args.vh})
             page = ctx.new_page()
         else:
             ctx = None
-            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            page = browser.new_page(viewport={"width": args.vw, "height": args.vh})
 
 
         #-----------------------------------------------------------
@@ -164,6 +176,17 @@ def main():
         # 稳健开局：点「开始这一部分」后必须看到进度变成 0/diff，否则重试。
         # 之前只等 1.2s 就点，点空了却继续跑，结果拿着上一局的 9 格棋盘去分析，
         # 表现为"一块都找不到 / 结果 0/N"。
+        # 「开始这一部分」按钮加载期间显示"准备中…"，此时点击无效。
+        # 窗口越大资源加载越久，所以必须先等按钮变成可用状态再点。
+        ready = {"ok": False, "text": ""}
+        for _ in range(60):                      # 最多等 18s
+            ready = json.loads(page.evaluate(JS_START_READY))
+            if ready.get("ok"):
+                break
+            page.wait_for_timeout(300)
+        if not ready.get("ok"):
+            print(f"[warn] 开始按钮未就绪: {ready}")
+
         r = None
         cur = tot = 0
         for attempt in range(4):
