@@ -406,6 +406,20 @@ def solve_one_bonus_level(page, part_id, diff, mode, piece_clf, cell_clf, args, 
         iy0 = 0
         ix1 = min(CW, int(inspect_pt[0] + pw * 1.15))
         iy1 = min(int(by - 3), int(CH))
+
+        # 检验台必须容得下整块（含凸齿），否则块会被画布上边界裁掉，
+        # 模板匹配恒为 -1.00，全部被误判成诱饵 -> 整关 0/N。
+        # 实测：画布 919x590 时检验台仅 68px，而 3x3 块高 149px，必然失败。
+        bench_h = iy1 - iy0
+        need_h = ph * 1.35
+        if bench_h < need_h:
+            need_canvas_h = int(by * 2 + bh + 20)
+            print(f"[检验台不足] 画布 {CW}x{CH} 棋盘高 {bh:.0f} -> 上方净空 {bench_h}px，"
+                  f"而块高 {ph:.0f}px 需要 >= {need_h:.0f}px")
+            print(f"             附加题依赖『棋盘上方黑底净空』做单块识别，屏幕太矮会整关失败。")
+            print(f"             建议：屏幕高度 >= 1200，或用虚拟屏运行：")
+            print(f'               xvfb-run -a -s "-screen 0 1920x1200x24" python run_bonus_overlap.py')
+            print(f"             该关仍会继续跑，但结果大概率不完整。")
     else:
         inspect_pt = (bx + bw + (CW - (bx + bw)) * 0.53, CH * 0.50)
         ix0 = max(int(bx + bw + 24), int(inspect_pt[0] - pw * 1.20))
