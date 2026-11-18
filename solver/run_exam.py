@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -32,11 +33,62 @@ import cv2
 import numpy as np
 from playwright.sync_api import sync_playwright
 
+# Windows 控制台默认 cp936(GBK)：打印 ✅ / ❌ / 🎉 会抛 UnicodeEncodeError，
+# 进程直接死在进度行上，看起来就是"跑不起来"。见 solver/console.py。
+from console import force_utf8
+
+force_utf8()
+
 from solver_core import (Analysis, anchor_order, compute_layout,
                           find_white_pieces, locate_piece, locate_piece_white)
-from white_shape import white_piece_edges
+from white_shape import board_color, cell_required_edges, white_piece_edges, white_piece_info
 
 URL = "https://puzzle.moyunliuyin.me/?mode=exam"
+
+# 站点素材在仓库里有一份完全一样的副本（tools/download_catalog.py 下的），
+# 用它喂给浏览器，开局就不用等 50 多张图从网上下来。
+CATALOG_DIR = Path(__file__).resolve().parent.parent / "dataset" / "raw"
+
+
+def install_catalog_cache(context, quiet=False):
+    """把 /assets/catalog/** 的请求改由本地 dataset/raw 供给。
+
+    为什么必须这么做（2026-11-16 版站点起）：
+      站点新增了 StateGuard，每 1.2s 调一次 board.verifyState() 对账。
+      而 ExamMode.startPart() 是**先** board.setDimensions(5,5)，**再**
+      await loadTheme() 去下 25 张照片 + 5 张诱饵 + 25 张参考图，
+      下完才 buildPieces()。这段窗口里棋盘还是上一局的 9 块，
+      对账看到 "cells 9 != grid 25" -> 判为外部篡改 -> board.locked = true，
+      之后 beginDrag / registerMove / checkSnap 全部直接 return，
+      表现就是**浏览器开了、鼠标也在动，但一块都吸不上**。
+
+      本地供给后这个窗口从 40~70s 缩到 1s 内，站点自己的对账正常通过。
+      这不是绕过校验：请求还是那份素材，只是从磁盘读。
+    """
+    served = {"n": 0, "miss": 0}
+    mem_cache: dict[Path, bytes] = {}
+
+    def handler(route):
+        m = re.search(r"/assets/catalog/([^/?#]+)/([^/?#]+)", route.request.url)
+        if not m:
+            return route.continue_()
+        path = CATALOG_DIR / m.group(1) / m.group(2)
+        data = mem_cache.get(path)
+        if data is None:
+            if not path.exists():
+                served["miss"] += 1
+                return route.continue_()
+            data = path.read_bytes()
+            mem_cache[path] = data
+        served["n"] += 1
+        route.fulfill(body=data, content_type="image/jpeg",
+                      headers={"cache-control": "public, max-age=604800"})
+
+    context.route("**/assets/catalog/**", handler)
+    if not quiet:
+        have = CATALOG_DIR.exists()
+        print(f"[素材] {'本地供给' if have else '本地缺失，回退联网'} {CATALOG_DIR}")
+    return served
 
 
 # ---------------------------------------------------------------- 页面操作
@@ -65,13 +117,29 @@ JS_START = """([part, diff]) => {
 
 JS_START_READY = """() => {
   const b = document.getElementById('btn-exam-start');
+  const panel = document.getElementById('exam-start');
+  const im = document.getElementById('preview-img');
   if (!b) return JSON.stringify({ok: false, why: 'no-button'});
   const t = (b.innerText || '').trim();
-  return JSON.stringify({ok: !b.disabled && t.includes('开始'), text: t, disabled: b.disabled});
+  // 1) 静态 HTML 里按钮文字本来就是「开始这一部分」，但弹窗是 hidden 的；
+  //    站点脚本绑定完点击事件后才会打开弹窗。
+  // 2) 页面首次加载时 new JigsawApp() 会在后台异步跑一次默认 9 格的 loadTheme('animals')，
+  //    完成后才会给 #preview-img 填上 data: URL。如果在这之前就点「开始这一部分」切到 16/25 格，
+  //    两次 loadTheme 会并发竞态，触发 StateGuard "cells 9 != grid 16/25"。
+  const open = panel ? !panel.hidden : false;
+  const booted = !!(im && im.src && im.src.startsWith('data:'));
+  return JSON.stringify({ok: open && booted && !b.disabled && t.includes('开始'),
+                         text: t, disabled: b.disabled, open: open, booted: booted});
 }"""
 
 JS_SWITCH = """() => { const b = document.getElementById('btn-exam-switch');
   if (b) { b.click(); return 'switch'; } return 'none'; }"""
+
+# 2026-11-16 版站点加了 StateGuard：判为篡改就把 board.locked 置 true，
+# 之后所有拖拽静默失效（看起来"鼠标在动但一块都吸不上"）。开局后查一次，好在日志里说清楚。
+JS_TAMPER = """() => { const d = document.documentElement.dataset.tamper;
+  const el = document.getElementById('integrity-alert');
+  return JSON.stringify({tamper: d || null, banner: el ? el.innerText.slice(0, 120) : null}); }"""
 
 
 def parse_progress(txt: str):
@@ -91,7 +159,9 @@ def to_bgr(data_url: str):
 
 # ---------------------------------------------------------------- 落子
 
-def drag(page, sx, sy, tx, ty, steps=12, delay=0.0):
+def drag(page, sx, sy, tx, ty, steps=None, delay=0.0):
+    if steps is None:
+        steps = 12 if delay else 5
     page.mouse.move(sx, sy)
     page.mouse.down()
     if delay:
@@ -118,141 +188,547 @@ def drop_piece(page, rect, L, slot, cell, jitter=(0, 0), slow=0.0):
     tx, ty = css_xy(rect, L["board"]["x"] + cell[1] * pw + pw / 2,
                     L["board"]["y"] + cell[0] * ph + ph / 2)
     drag(page, sx, sy, tx, ty, delay=slow)
-    time.sleep(0.08 if not slow else slow + 0.05)
+    time.sleep(0.015 if not slow else slow + 0.05)
+
+
+# ---------------------------------------------------------------- 窗口
+
+def screen_metrics(browser, fallback=(1600, 900, 1.0)):
+    """真实屏幕可用尺寸 + 设备像素比。
+
+    必须开一个**没有视口模拟**的临时上下文去问：一旦设了 viewport，
+    Playwright 会把 screen 和 devicePixelRatio 一起模拟掉，业务页里读到的是
+    假的 1280x800 / DPR 1.0（实测），按那个值放大视口等于没放大。
+    """
+    try:
+        ctx = browser.new_context(no_viewport=True)
+        pg = ctx.new_page()
+        w, h = pg.evaluate("() => [screen.availWidth, screen.availHeight]")
+        dpr = pg.evaluate("() => devicePixelRatio")
+        ctx.close()
+        return int(w), int(h), float(dpr)
+    except Exception as e:
+        print(f"[窗口] 读屏幕尺寸失败，用默认 {fallback}：{type(e).__name__}")
+        return fallback
+
+
+def maximize_window(page):
+    """把浏览器窗口外框最大化（视口已经按屏幕尺寸设好）。"""
+    try:
+        cdp = page.context.new_cdp_session(page)
+        wid = cdp.send("Browser.getWindowForTarget")["windowId"]
+        cdp.send("Browser.setWindowBounds",
+                 {"windowId": wid, "bounds": {"windowState": "maximized"}})
+    except Exception as e:
+        print(f"[窗口] 最大化窗口失败（继续用当前窗口）：{type(e).__name__}")
+
+
+# ---------------------------------------------------------------- 开局
+
+JS_SUB = ("() => { const e = document.getElementById('exam-part-sub');"
+          " return e ? e.innerText : ''; }")
+
+JS_PANEL = ("() => { const e = document.getElementById('exam-start');"
+            " return e ? !e.hidden : false; }")
+
+START_TIMEOUT = 90.0      # 站点要下完 25+5 张图才切到 0/25，慢网络实测 10~40s
+
+# 考核真正「开局成功」的判据（只看进度数字不够）：
+#   考核页一打开，默认就是 Part 1 · 9 格，#progress-display 已经显示 "0 / 9"，
+#   但此时「开始这一部分」弹窗还盖在画布上，考核根本没开始。旧代码看到 tot==9
+#   就以为「已在运行」，于是拖拽全落在弹窗上 —— 这就是 Part 1 · 3×3 永远 0/9 的原因。
+# 所以必须同时满足：
+#   1. 弹窗 #exam-start 已隐藏
+#   2. 横幅状态 #exam-state 是 data-state="running" 且文字为「进行中」
+#      （点击后先是「准备中…」，素材加载完才变「进行中」）
+#   3. 横幅徽标 #exam-part-badge 是目标部分（第 N 部分）
+#   4. 进度分母 == 目标格数
+JS_EXAM_STATUS = """() => {
+  const q = id => document.getElementById(id);
+  const panel = q('exam-start'), st = q('exam-state'), badge = q('exam-part-badge');
+  const prog = q('progress-display'), btn = q('btn-exam-start');
+  return JSON.stringify({
+    panel_open: panel ? !panel.hidden : false,
+    state: st ? (st.dataset.state || '') : '',
+    label: st ? (st.textContent || '').trim() : '',
+    badge: badge ? (badge.textContent || '').trim() : '',
+    progress: prog ? prog.innerText : '',
+    busy: btn ? btn.disabled : false,
+  });
+}"""
+
+
+def exam_status(page):
+    try:
+        return json.loads(page.evaluate(JS_EXAM_STATUS))
+    except Exception:                                  # 页面正在导航/重绘
+        return {}
+
+
+def exam_running(s, part, diff):
+    """s = exam_status() 的结果；判断目标 part/diff 是否真的在进行中。"""
+    if not s:
+        return False
+    _, tot = parse_progress(s.get("progress", ""))
+    return (not s.get("panel_open")
+            and s.get("state") == "running"
+            and "进行中" in s.get("label", "")
+            and f"第 {part} 部分" in s.get("badge", "")
+            and tot == diff)
+
+
+def wait_start_ready(page, timeout=25.0):
+    """等「开始这一部分」从『准备中…/禁用』变成可点。"""
+    t0 = time.time()
+    last = {}
+    while time.time() - t0 < timeout:
+        try:
+            last = json.loads(page.evaluate(JS_START_READY))
+        except Exception as e:                       # 页面正在导航
+            last = {"ok": False, "text": f"{type(e).__name__}"}
+        if last.get("ok"):
+            return last
+        page.wait_for_timeout(100)
+    return last
+
+
+def start_exam(page, part, diff, url=URL, timeout=START_TIMEOUT, verbose=True):
+    """开局：点一次「开始这一部分」，然后**耐心**等到进度变成 0/diff。
+
+    为什么旧版会"一直卡在选择难度界面"：
+      站点 startPart() 里先 setState('准备中…') + 禁用按钮，再 await loadTheme()，
+      而 loadTheme 要等 25 张照片 + 5 张诱饵 + 25 张参考图全部 onload 才 resolve
+      （实测这一步 10~40s，慢网络更久）。旧代码只等 10s 就认为"开局未生效"，
+      接着又去点按钮 —— 但那时 busy=true、按钮 disabled，点击被静默吞掉，
+      于是重试 4 次全落空，最后抛「开局失败」，屏幕就停在准备中/选择界面。
+
+    现在：只点一次，然后轮询 progress；真的超时才整页重载重来（最多 3 次）。
+    """
+    for attempt in range(1, 4):
+        # 已经是目标部分/难度在跑（例如上一轮其实成功了），直接用。
+        # 注意：必须用 exam_running() 判断，不能只看 "0 / 9"（见 JS_EXAM_STATUS 注释）
+        s = exam_status(page)
+        if exam_running(s, part, diff):
+            cur, tot = parse_progress(s["progress"])
+            if verbose:
+                print(f"[开局] 已在运行 {cur}/{tot}")
+            return cur, tot
+
+        # 弹窗没打开才需要点「切换」回到选择界面
+        # （进行中点切换会弹 confirm，Playwright 默认自动取消，所以这里只在必要时点）
+        if not s.get("panel_open"):
+            try:
+                page.evaluate(JS_SWITCH)
+            except Exception:
+                pass
+            page.wait_for_timeout(200)
+
+        ready = wait_start_ready(page, 25.0)
+        if not ready.get("ok") and verbose:
+            print(f"[开局 {attempt}] 按钮未就绪（{ready.get('text')}），仍在准备中，继续等…")
+
+        r = page.evaluate(JS_START, [part, diff])
+        if verbose:
+            print(f"[开局 {attempt}] 点击开始 -> {r}")
+        t0 = time.time()
+        note = 0.0
+        while time.time() - t0 < timeout:
+            page.wait_for_timeout(100)
+            s = exam_status(page)
+            if not s:                                # 页面正在重绘/导航
+                continue
+            cur, tot = parse_progress(s.get("progress", ""))
+            if exam_running(s, part, diff):
+                if verbose:
+                    print(f"[开局] 成功 {cur}/{tot}，用时 {time.time() - t0:.1f}s")
+                return cur, tot
+            sub = page.evaluate(JS_SUB) or ""
+            if "无法准备" in sub:
+                print(f"[开局 {attempt}] 站点报错：{sub}")
+                break
+            el = time.time() - t0
+            if verbose and el >= note:
+                print(f"[开局] 准备中 {el:.0f}s…（进度 {cur}/{tot}，"
+                      f"等站点下完素材会自动切换）")
+                note = el + 10
+
+        # 超时：整页重载再试（重载会把卡住的 Image 请求清掉）
+        if attempt < 3:
+            print(f"[开局 {attempt}] {timeout:.0f}s 内没起来，整页重载重试…")
+            try:
+                page.goto(url, wait_until="load", timeout=60000)
+                page.wait_for_timeout(2500)
+            except Exception as e:
+                print(f"[开局] 重载失败 {type(e).__name__}: {e}")
+
+    raise RuntimeError(f"开局失败：{timeout:.0f}s 内进度没有变成 0/{diff}"
+                       f"（part={part}）。多半是站点素材下载卡住，网络通了再跑。")
+
+
+def solve_one_level(page, part, diff, classifier, cell_classifier, args, shots=None):
+    """在已打开的浏览器页面上完成指定 (part, diff) 的一局，返回 (cur, tot, elapsed)。"""
+    t_level = time.time()
+    rows = cols = int(round(diff ** 0.5))
+    n_decoys = round(diff * 0.2)
+    part_names = {1: "照片", 2: "纯白", 3: "混合"}
+    print("\n" + "=" * 64)
+    print(f"▶ 开始关卡：Part {part}（{part_names.get(part, '')}）· {rows}×{cols}（{diff} 格 + {n_decoys} 诱饵）")
+    print("=" * 64)
+
+    # 每局开始前清空 YOLO 的键缓存（因为键是 (row, col) 和 ('piece', i)，跨局不能复用）
+    for clf in (classifier, cell_classifier):
+        if clf is not None and hasattr(clf, "_cache"):
+            clf._cache.clear()
+
+    if shots:
+        shots.mkdir(parents=True, exist_ok=True)
+
+    # 站点偶尔很慢，goto 也可能超时，重试几次
+    for gi in range(3):
+        try:
+            page.goto(URL, wait_until="load", timeout=45000)
+            break
+        except Exception as e:
+            print(f"[goto 重试 {gi+1}] {type(e).__name__}")
+            page.wait_for_timeout(1500)
+
+    cur, tot = start_exam(page, part, diff, timeout=args.start_timeout)
+    r = "start_exam"
+
+    for _retry in range(1, 6):
+        _t = json.loads(page.evaluate(JS_TAMPER))
+        if not _t.get("tamper"):
+            break
+        print(f"[开局] 站点对账把这次开局判成篡改（{_t['tamper']}），刷新重开 {_retry}/5")
+        page.goto(URL, wait_until="load", timeout=60000)
+        cur, tot = start_exam(page, part, diff, timeout=args.start_timeout)
+    else:
+        raise RuntimeError("连续 5 次开局都撞上站点自己的对账窗口，稍后重试")
+
+    canvas = None
+    for wi in range(150):                # 最多等 15s
+        page.wait_for_timeout(100)
+        canvas = to_bgr(page.evaluate(JS_CANVAS_PNG))
+        if float(canvas.mean()) > 5:
+            break
+    else:
+        raise RuntimeError("画布一直空白（均值≈0），站点可能没渲染完成")
+    page.wait_for_timeout(150)
+    print(f"开局: part={part} diff={diff} rows={rows} decoys={n_decoys} -> {r}")
+    print(f"就绪: 进度 {page.evaluate(JS_PROGRESS)}  画布均值 {canvas.mean():.1f}")
+
+    rect = json.loads(page.evaluate(JS_CANVAS_RECT))
+    canvas = to_bgr(page.evaluate(JS_CANVAS_PNG))
+    rect["sx"] = rect["w"] / canvas.shape[1]
+    rect["sy"] = rect["h"] / canvas.shape[0]
+    if abs(rect["sx"] - 1) > 0.01 or abs(rect["sy"] - 1) > 0.01:
+        print(f"[DPR] 画布 {canvas.shape[1]}x{canvas.shape[0]} -> "
+              f"CSS {rect['w']:.0f}x{rect['h']:.0f}，坐标换算 sx={rect['sx']:.3f} sy={rect['sy']:.3f}")
+    refinfo = json.loads(page.evaluate(JS_REF))
+    ref = to_bgr(refinfo["src"])
+    if shots:
+        cv2.imwrite(str(shots / "01_start_canvas.png"), canvas)
+    print(f"画布 {canvas.shape[1]}x{canvas.shape[0]}  参考图 {ref.shape[1]}x{ref.shape[0]}")
+
+    # ---- 视觉分析（YOLO 已在开局前加载好）
+    A = Analysis(canvas, ref, rows, cols, n_decoys)
+    res = A.match_photo_pieces(classifier=classifier,
+                               cell_classifier=cell_classifier)
+    if classifier is not None and A.photo_cells:
+        print(f"YOLO 类别一致命中 {getattr(A, 'class_hits', 0)} 对（作为指派加分项）")
+    print(f"白格 {len(A.white_cells)} 个: {[(c['row'], c['col']) for c in A.white_cells]}")
+    print(f"白块 {len(res['white_slots'])} 个: {res['white_slots']}")
+    print(f"照片映射 {len(res['assign'])} 个，诱饵 {len(res['decoys'])} 个: {res['decoys']}")
+
+    L = A.L
+    pw, ph = L["piece"]["w"], L["piece"]["h"]
+    slots = L["slots"]
+
+    # ---- 按锚点顺序落照片块
+    order = anchor_order(res["assign"])
+    print(f"\n开始落子，锚点顺序 {len(order)} 步")
+    placed = parse_progress(page.evaluate(JS_PROGRESS))[0]
+    placed_cells: set[tuple[int, int]] = set()
+    cell_img = {(c["row"], c["col"]): c["img"] for c in A.photo_cells}
+    for k, i in enumerate(order, 1):
+        a = res["assign"][i]
+        cell = (a["row"], a["col"])
+        before = placed
+        drop_piece(page, rect, L, slots[i], cell, jitter=a["jitter"], slow=args.slow)
+        after = parse_progress(page.evaluate(JS_PROGRESS))[0]
+
+        tries = 0
+        if after == before:
+            # 若带 jitter 没吸上，可能是块还留在槽位或抖动估计偏了，直接退回原槽位交给后面补位阶段处理
+            tx, ty = css_xy(rect, L["board"]["x"] + cell[1] * pw + pw / 2,
+                            L["board"]["y"] + cell[0] * ph + ph / 2)
+            px_back, py_back = css_xy(rect, slots[i]["x"] + pw / 2, slots[i]["y"] + ph / 2)
+            drag(page, tx, ty, px_back, py_back, delay=0)
+            time.sleep(0.02)
+
+        ok = after > before
+        if ok:
+            placed_cells.add(cell)
+        placed = after
+        print(f"  {k:2d}/{len(order)} 块#{i:02d} -> {cell} "
+              f"score={a['score']:.2f} {'✅' if ok else '❌'}"
+              f"{' (重试)' if tries else ''} 进度 {after}/{diff}")
+
+    # 若有照片格未吸上，用落选照片槽位 + 未吸附槽位按模板分从高到低逐个补试
+    missed_photo = [(c["row"], c["col"]) for c in A.photo_cells
+                    if (c["row"], c["col"]) not in placed_cells]
+    if missed_photo:
+        from solver_core import template_score
+        failed_slots = [i for i in order if (res["assign"][i]["row"], res["assign"][i]["col"]) not in placed_cells]
+        spare_slots = list(dict.fromkeys(list(res["decoys"]) + failed_slots))
+        for mcell in list(missed_photo):
+            ranked = sorted(
+                spare_slots,
+                key=lambda si: -template_score(res["pads"][si][0], cell_img[mcell], pw, ph)[0],
+            )
+            for si in ranked:
+                sc_s, dx_s, dy_s = template_score(res["pads"][si][0], cell_img[mcell], pw, ph)
+                before = placed
+                drop_piece(page, rect, L, slots[si], mcell,
+                           jitter=(0, 0), slow=args.slow)
+                after = parse_progress(page.evaluate(JS_PROGRESS))[0]
+                if after > before:
+                    placed = after
+                    placed_cells.add(mcell)
+                    spare_slots.remove(si)
+                    print(f"  [补位] 块#{si:02d} -> {mcell} score={sc_s:.2f} ✅ 进度 {after}/{diff}")
+                    break
+                else:
+                    tx, ty = css_xy(rect, L["board"]["x"] + mcell[1] * pw + pw / 2,
+                                    L["board"]["y"] + mcell[0] * ph + ph / 2)
+                    px_b, py_b = css_xy(rect, slots[si]["x"] + pw / 2, slots[si]["y"] + ph / 2)
+                    drag(page, tx, ty, px_b, py_b, delay=0)
+                    time.sleep(0.02)
+
+    if shots:
+        cv2.imwrite(str(shots / "02_after_photo.png"), to_bgr(page.evaluate(JS_CANVAS_PNG)))
+
+    # ---- 白块求解：齿型约束（直边 + 邻接凹凸互补）+ 锚点顺序 + 缓存位置
+    cur, tot = placed, diff
+    if cur < tot and A.white_cells and res["white_slots"]:
+        white_cells = [(c["row"], c["col"]) for c in A.white_cells
+                       if (c["row"], c["col"]) not in placed_cells]
+        print(f"\n白块：剩余 {tot - cur} 块，白格 {white_cells}")
+
+        pure_white_mode = len(A.photo_cells) == 0
+        wp_edges = {}
+        white_pos = {}
+        white_decoy = {}
+        for i in res["white_slots"]:
+            e, pos_xy, is_dec = white_piece_info(
+                canvas, slots[i], pw, ph, pure_white_mode=pure_white_mode
+            )
+            wp_edges[i] = e
+            white_pos[i] = pos_xy
+            white_decoy[i] = is_dec
+            tag = " [空心齿=诱饵]" if is_dec else ""
+            print(f"  白块槽位#{i} 齿型 {e}  flat数={sum(1 for v in e.values() if v == 0)}{tag}")
+
+        req_edges = {}
+        if placed_cells:
+            cv_board = to_bgr(page.evaluate(JS_CANVAS_PNG))
+            bg_col = board_color(cv_board, L)
+            for cell in white_cells:
+                req_edges[cell] = cell_required_edges(cv_board, L, cell[0], cell[1], bg_col)
+
+        placed_white_edges: dict[tuple[int, int], dict[str, int]] = {}
+        used_white: set[int] = set()
+
+        def has_white_anchor(cell):
+            r, c = cell
+            if r in (0, rows - 1) or c in (0, cols - 1):
+                return True
+            return any((r + dr, c + dc) in placed_cells
+                       for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)))
+
+        def border_ok(edges, cell):
+            r, c = cell
+            if (r == 0 and edges["top"] != 0) or (r != 0 and edges["top"] == 0):
+                return False
+            if (r == rows - 1 and edges["bottom"] != 0) or (r != rows - 1 and edges["bottom"] == 0):
+                return False
+            if (c == 0 and edges["left"] != 0) or (c != 0 and edges["left"] == 0):
+                return False
+            if (c == cols - 1 and edges["right"] != 0) or (c != cols - 1 and edges["right"] == 0):
+                return False
+            return True
+
+        NEIGH = (
+            (-1, 0, "top", "bottom"),
+            (1, 0, "bottom", "top"),
+            (0, -1, "left", "right"),
+            (0, 1, "right", "left"),
+        )
+
+        def compat_rank(i, cell):
+            e = wp_edges[i]
+            b_bad = 0 if border_ok(e, cell) else 1
+            r, c = cell
+            mismatch = 0
+            match = 0
+            for dr, dc, side, opp in NEIGH:
+                nb = (r + dr, c + dc)
+                if nb in placed_white_edges:
+                    ne = placed_white_edges[nb][opp]
+                    if e[side] != 0 and ne != 0:
+                        if e[side] + ne == 0:
+                            match += 2
+                        else:
+                            mismatch += 2
+                elif nb in placed_cells and cell in req_edges:
+                    re_val = req_edges[cell][side]
+                    if re_val != 0 and e[side] != 0:
+                        if e[side] == re_val:
+                            match += 1
+                        else:
+                            mismatch += 1
+            n_border = (1 if r in (0, rows - 1) else 0) + (1 if c in (0, cols - 1) else 0)
+            dec_pen = 1 if white_decoy.get(i, False) else 0
+            return (dec_pen, b_bad, mismatch, -match, -n_border, i)
+
+        def attempt_white(i, cell, refresh_loc=False):
+            nonlocal cur, tot
+            if refresh_loc or i not in white_pos:
+                cv = to_bgr(page.evaluate(JS_CANVAS_PNG))
+                _, pos_xy, _ = white_piece_info(
+                    cv, slots[i], pw, ph, pure_white_mode=pure_white_mode
+                )
+                white_pos[i] = pos_xy
+            cx, cy = white_pos[i]
+            sx, sy = css_xy(rect, cx, cy)
+            tx, ty = css_xy(rect, L["board"]["x"] + cell[1] * pw + pw / 2,
+                            L["board"]["y"] + cell[0] * ph + ph / 2)
+            before = cur
+            drag(page, sx, sy, tx, ty, delay=args.slow)
+            time.sleep(0.02 if not args.slow else args.slow + 0.05)
+            cur, tot = parse_progress(page.evaluate(JS_PROGRESS))
+            if cur > before:
+                print(f"  白块#{i} -> {cell} ✅ 进度 {cur}/{tot}")
+                used_white.add(i)
+                white_cells.remove(cell)
+                placed_cells.add(cell)
+                placed_white_edges[cell] = wp_edges[i]
+                return True
+            print(f"  白块#{i} 试 {cell} ✗")
+            park_cx, park_cy = slots[i]["x"] + pw / 2, slots[i]["y"] + ph / 2
+            park_x, park_y = css_xy(rect, park_cx, park_cy)
+            drag(page, tx, ty, park_x, park_y, delay=0)
+            time.sleep(0.015)
+            white_pos[i] = (park_cx, park_cy)
+            return False
+
+        for round_idx in range(3):
+            if cur >= tot or not white_cells:
+                break
+            tried: set[tuple[int, tuple[int, int]]] = set()
+            refresh = round_idx > 0
+            if refresh:
+                print(f"  白块补位第 {round_idx} 轮（剩 {len(white_cells)} 格）")
+            while cur < tot and white_cells:
+                anchored = [c for c in white_cells if has_white_anchor(c)] or list(white_cells)
+                avail_slots = [i for i in res["white_slots"] if i not in used_white]
+                cands = [
+                    (compat_rank(i, cell), i, cell)
+                    for cell in anchored
+                    for i in avail_slots
+                    if (i, cell) not in tried
+                ]
+                if not cands:
+                    break
+                cands.sort(key=lambda t: t[0])
+                _, best_i, best_cell = cands[0]
+                tried.add((best_i, best_cell))
+                attempt_white(best_i, best_cell, refresh_loc=refresh)
+                refresh = False
+
+    cur, tot = parse_progress(page.evaluate(JS_PROGRESS))
+    if shots:
+        cv2.imwrite(str(shots / "03_final.png"), to_bgr(page.evaluate(JS_CANVAS_PNG)))
+        page.screenshot(path=str(shots / "04_page.png"))
+
+    elapsed = round(time.time() - t_level, 1)
+    _t = json.loads(page.evaluate(JS_TAMPER))
+    if _t.get("tamper") and cur < tot:
+        print(f"[warn] 本局被 StateGuard 判为篡改：{_t['tamper']}")
+    print(f"\n=== Part {part} · {diff}格 结果 {cur}/{tot} | 用时 {elapsed}s | "
+          f"{'🎉 通关' if cur == tot else '未完成'} ===")
+    return cur, tot, elapsed
 
 
 # ---------------------------------------------------------------- 主流程
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--part", type=int, default=3)
-    ap.add_argument("--diff", type=int, default=25)
-    ap.add_argument("--headful", action="store_true",default=True, help="弹窗口（演示用）")
+    ap.add_argument("--part", type=int, default=None,
+                    help="指定部分 (1=照片, 2=纯白, 3=混合)；不传则默认依次跑完 Part 1/2/3")
+    ap.add_argument("--diff", type=int, default=None,
+                    help="指定难度 (9/16/25)；不传则默认依次跑完 9 -> 16 -> 25")
+    ap.add_argument("--headful", action=argparse.BooleanOptionalAction, default=True,
+                    help="弹窗口（默认开）；--no-headful 无头跑")
+    ap.add_argument("--start-timeout", type=float, default=START_TIMEOUT,
+                    help=f"等「准备中…」变成 0/diff 的最长秒数（默认 {START_TIMEOUT:.0f}）")
     ap.add_argument("--slow", type=float, default=0.0, help="每步放慢秒数")
     ap.add_argument("--shots", default=None, help="截图输出目录")
     ap.add_argument("--max-seconds", type=float, default=300)
     ap.add_argument("--video", default=None, help="录屏目录（WebM），用于演示视频")
     ap.add_argument("--no-yolo", action="store_true", help="不加载 YOLO，只用 OpenCV")
-    # 窗口大小会改变画布尺寸（1280x800 -> 919x653；1600x1000 -> 1159x853）。
-    # 默认保持 1280x800：这是实测 25/25 稳定的配置。
-    # 更大的窗口画布更大、匹配分数更高，但实测落子全失败（坐标缩放待查），不要默认开。
-    ap.add_argument("--dpr", type=float, default=1.0,
-                    help="设备像素比，Windows 125%%/150%% 缩放可试 1.25/1.5 复现")
-    ap.add_argument("--vw", type=int, default=1280, help="窗口宽")
-    ap.add_argument("--vh", type=int, default=800, help="窗口高")
+    ap.add_argument("--auto-close", action="store_true",
+                    help="通关后展示 1.5s 自动关闭窗口（用于连续演示）")
+    ap.add_argument("--maximize", action=argparse.BooleanOptionalAction, default=True,
+                    help="有头模式最大化窗口（默认开）；--no-maximize 用 --vw/--vh")
+    ap.add_argument("--dpr", type=float, default=None,
+                    help="设备像素比；最大化时自动取屏幕真实值，无头/带 --vw 时默认 1.0")
+    ap.add_argument("--vw", type=int, default=1280, help="窗口宽（无头 / --no-maximize）")
+    ap.add_argument("--vh", type=int, default=800, help="窗口高（无头 / --no-maximize）")
     args = ap.parse_args()
 
-
-    #---------------------------------------------------------------处理传参
-
-    rows = cols = int(round(args.diff ** 0.5))
-    n_decoys = round(args.diff * 0.2) if args.part == 3 else 0
-    # Part 1/2 也带诱饵，按站点规则 20%
-    n_decoys = round(args.diff * 0.2)
-    shots = Path(args.shots) if args.shots else None
-    if shots:
-        shots.mkdir(parents=True, exist_ok=True)
+    parts = [args.part] if args.part is not None else [1, 2, 3]
+    if args.diff == 4:
+        print("[提示] 新版考核站已移除 4 格 (2×2) 选项（站点源码 Math.max(3, size) 最小为 3×3=9 格），自动切换为 9 格。")
+        args.diff = 9
+    diffs = [args.diff] if args.diff is not None else [9, 16, 25]
+    schedule = [(pt, df) for pt in parts for df in diffs]
+    shots_root = Path(args.shots) if args.shots else None
 
     t_start = time.time()
     with sync_playwright() as p:
         browser = p.chromium.launch(channel="chrome", headless=not args.headful,
                                     args=["--no-sandbox", "--disable-dev-shm-usage"])
 
-        #-----------------------------------------------------------
+        if args.maximize and args.headful:
+            aw, ah, real_dpr = screen_metrics(browser)
+            vw_css, vh_css = aw, max(600, ah - 8)
+            scale = args.dpr or real_dpr
+            print(f"[窗口] 屏幕 {aw}x{ah} · DPR {scale:g} -> 视口 {vw_css}x{vh_css}")
+        else:
+            vw_css, vh_css = args.vw, args.vh
+            scale = args.dpr or 1.0
+        viewport = {"width": vw_css, "height": vh_css}
+
         if args.video:
             vdir = Path(args.video)
             vdir.mkdir(parents=True, exist_ok=True)
             ctx = browser.new_context(
-                viewport={"width": args.vw, "height": args.vh},
-                device_scale_factor=args.dpr,
+                viewport=viewport,
+                device_scale_factor=scale,
                 record_video_dir=str(vdir),
                 record_video_size={"width": args.vw, "height": args.vh})
             page = ctx.new_page()
         else:
             ctx = None
-            page = browser.new_page(viewport={"width": args.vw, "height": args.vh},
-                                    device_scale_factor=args.dpr)
+            page = browser.new_page(viewport=viewport, device_scale_factor=scale)
 
+        if args.maximize and args.headful:
+            maximize_window(page)
 
-        #-----------------------------------------------------------
+        install_catalog_cache(page.context)
 
-
-
-        # 站点偶尔很慢，goto 也可能超时，重试几次
-        for gi in range(3):
-            try:
-                page.goto(URL, wait_until="load", timeout=45000)
-                break
-            except Exception as e:
-                print(f"[goto 重试 {gi+1}] {type(e).__name__}")
-                page.wait_for_timeout(2000)
-        page.wait_for_timeout(2500)      # 站点脚本初始化较慢，等够再点
-
-        # 稳健开局：点「开始这一部分」后必须看到进度变成 0/diff，否则重试。
-        # 之前只等 1.2s 就点，点空了却继续跑，结果拿着上一局的 9 格棋盘去分析，
-        # 表现为"一块都找不到 / 结果 0/N"。
-        # 「开始这一部分」按钮加载期间显示"准备中…"，此时点击无效。
-        # 窗口越大资源加载越久，所以必须先等按钮变成可用状态再点。
-        ready = {"ok": False, "text": ""}
-        for _ in range(60):                      # 最多等 18s
-            ready = json.loads(page.evaluate(JS_START_READY))
-            if ready.get("ok"):
-                break
-            page.wait_for_timeout(300)
-        if not ready.get("ok"):
-            print(f"[warn] 开始按钮未就绪: {ready}")
-
-        r = None
-        cur = tot = 0
-        for attempt in range(4):
-            page.evaluate(JS_SWITCH)
-            page.wait_for_timeout(800)
-            r = page.evaluate(JS_START, [args.part, args.diff])
-            for _ in range(50):                      # 最多等 10s
-                page.wait_for_timeout(200)
-                cur, tot = parse_progress(page.evaluate(JS_PROGRESS))
-                if tot == args.diff:
-                    break
-            if tot == args.diff:
-                break
-            print(f"[重试 {attempt+1}] 开局未生效（进度 {cur}/{tot}，期望 0/{args.diff}）")
-        if tot != args.diff:
-            raise RuntimeError(
-                f"开局失败：进度 {cur}/{tot}，期望 0/{args.diff}"
-                f"（part={args.part} diff={args.diff} 返回值 {r}）")
-
-        # 等画布真正绘制出来再分析。
-        # 实测开局后画布会有几秒钟是全黑（均值 0.0），此时分析会得到"一块都找不到"。
-        canvas = None
-        for wi in range(50):                 # 最多等 15s
-            page.wait_for_timeout(300)
-            canvas = to_bgr(page.evaluate(JS_CANVAS_PNG))
-            if float(canvas.mean()) > 5:
-                break
-        else:
-            raise RuntimeError("画布一直空白（均值≈0），站点可能没渲染完成")
-        page.wait_for_timeout(700)
-        canvas = to_bgr(page.evaluate(JS_CANVAS_PNG))
-        print(f"开局: part={args.part} diff={args.diff} rows={rows} decoys={n_decoys} -> {r}")
-        print(f"就绪: 进度 {page.evaluate(JS_PROGRESS)}  画布均值 {canvas.mean():.1f}")
-
-        rect = json.loads(page.evaluate(JS_CANVAS_RECT))
-        canvas = to_bgr(page.evaluate(JS_CANVAS_PNG))
-        # 画布内部像素 vs CSS 像素（高 DPI / 浏览器缩放时不等）
-        rect["sx"] = rect["w"] / canvas.shape[1]
-        rect["sy"] = rect["h"] / canvas.shape[0]
-        if abs(rect["sx"] - 1) > 0.01 or abs(rect["sy"] - 1) > 0.01:
-            print(f"[DPR] 画布 {canvas.shape[1]}x{canvas.shape[0]} -> "
-                  f"CSS {rect['w']:.0f}x{rect['h']:.0f}，坐标换算 sx={rect['sx']:.3f} sy={rect['sy']:.3f}")
-        refinfo = json.loads(page.evaluate(JS_REF))
-        ref = to_bgr(refinfo["src"])
-        if shots:
-            cv2.imwrite(str(shots / "01_start_canvas.png"), canvas)
-        print(f"画布 {canvas.shape[1]}x{canvas.shape[0]}  参考图 {ref.shape[1]}x{ref.shape[0]}")
-
-        # ---- YOLO（可选：模型缺失时自动降级为纯 OpenCV）
-        # 分工：检测模型（YOLO11s）管**格子**——格子里是完整物体，实测 20/20 检出；
-        #      分类模型管**拼图块**——块是局部碎片，检测模型会乱认。
+        # ---- YOLO 在全部关卡开始前只加载并预热一次
         classifier = None          # 拼图块用
         cell_classifier = None     # 参考格用
         if not args.no_yolo:
@@ -271,154 +747,54 @@ def main():
                     classifier = cell_classifier
                 if cell_classifier is None:
                     cell_classifier = classifier
+                dummy = np.full((240, 320, 3), 128, np.uint8)
+                for clf in {id(c): c for c in (classifier, cell_classifier) if c}.values():
+                    clf.predict(dummy)
             except Exception as e:
                 print(f"[warn] YOLO 未启用，退回纯 OpenCV：{e}")
+                classifier = cell_classifier = None
 
-        # ---- 视觉分析
-        A = Analysis(canvas, ref, rows, cols, n_decoys)
-        res = A.match_photo_pieces(classifier=classifier,
-                                   cell_classifier=cell_classifier)
-        if classifier is not None:
-            print(f"YOLO 类别一致命中 {getattr(A, 'class_hits', 0)} 对（作为指派加分项）")
-        print(f"白格 {len(A.white_cells)} 个: {[(c['row'], c['col']) for c in A.white_cells]}")
-        print(f"白块 {len(res['white_slots'])} 个: {res['white_slots']}")
-        print(f"照片映射 {len(res['assign'])} 个，诱饵 {len(res['decoys'])} 个: {res['decoys']}")
+        summary = []
+        part_names = {1: "Part 1 · 照片", 2: "Part 2 · 纯白", 3: "Part 3 · 混合"}
+        for idx, (pt, df) in enumerate(schedule):
+            sub_shots = (
+                (shots_root / f"p{pt}_{df}" if len(schedule) > 1 else shots_root)
+                if shots_root else None
+            )
+            cur, tot, dt = solve_one_level(
+                page, pt, df, classifier, cell_classifier, args, shots=sub_shots
+            )
+            summary.append((pt, df, cur, tot, dt))
+            if idx < len(schedule) - 1:
+                page.wait_for_timeout(800)
 
-        L = A.L
-        pw, ph = L["piece"]["w"], L["piece"]["h"]
-        slots = L["slots"]
+        if len(summary) > 1:
+            total_dt = round(time.time() - t_start, 1)
+            passed = sum(1 for _, _, c, t, _ in summary if c == t and t > 0)
+            print("\n" + "=" * 64)
+            print(f"全部关卡汇总：{passed}/{len(summary)} 关通关 | 总用时 {total_dt}s")
+            print("-" * 64)
+            for pt, df, c, t, dt in summary:
+                r_sz = int(round(df ** 0.5))
+                ok_s = "✅ 通关" if (c == t and t > 0) else "❌ 未完成"
+                print(f"  {part_names.get(pt, f'Part {pt}'):<14} | {r_sz}×{r_sz} ({df:>2}格) | "
+                      f"{c:>2}/{t:<2} | {dt:>5.1f}s | {ok_s}")
+            print("=" * 64)
 
-        # ---- 按锚点顺序落照片块
-        order = anchor_order(res["assign"])
-        print(f"\n开始落子，锚点顺序 {len(order)} 步")
-        placed = 0
-        cell_of = {i: (a["row"], a["col"]) for i, a in res["assign"].items()}
-        cell_img = {(c["row"], c["col"]): c["img"] for c in A.photo_cells}
-        for k, i in enumerate(order, 1):
-            a = res["assign"][i]
-            cell = (a["row"], a["col"])
-            before = parse_progress(page.evaluate(JS_PROGRESS))[0]
-            drop_piece(page, rect, L, slots[i], cell, jitter=a["jitter"], slow=args.slow)
-            after = parse_progress(page.evaluate(JS_PROGRESS))[0]
-
-            # 失败重试：重新在画布上按内容定位这块，再拖一次（最多 2 次）
-            tries = 0
-            while after == before and tries < 2:
-                tries += 1
-                cv_now = to_bgr(page.evaluate(JS_CANVAS_PNG))
-                loc = locate_piece(cv_now, cell_img[cell], pw, ph, L)
-                if not loc:
-                    break
-                sx, sy = css_xy(rect, loc["cx"], loc["cy"])
-                tx, ty = css_xy(rect, L["board"]["x"] + cell[1] * pw + pw / 2,
-                                L["board"]["y"] + cell[0] * ph + ph / 2)
-                drag(page, sx, sy, tx, ty, delay=args.slow)
-                time.sleep(0.10)
-                after = parse_progress(page.evaluate(JS_PROGRESS))[0]
-
-            ok = after > before
-            placed = after
-            print(f"  {k:2d}/{len(order)} 块#{i:02d} -> {cell} "
-                  f"score={a['score']:.2f} {'✅' if ok else '❌'}"
-                  f"{' (重试)' if tries else ''} 进度 {after}/{args.diff}")
-
-        if shots:
-            cv2.imwrite(str(shots / "02_after_photo.png"), to_bgr(page.evaluate(JS_CANVAS_PNG)))
-
-        # ---- 白块用排除法：每次先重新扫描白块位置（失败后块会被拖到别处，不能再用原槽位）
-        cur, tot = parse_progress(page.evaluate(JS_PROGRESS))
-        if cur < tot:
-            white_cells = [(c["row"], c["col"]) for c in A.white_cells]
-            print(f"\n白块：剩余 {tot - cur} 块，白格 {white_cells}")
-
-            # 每个白块的齿型（用开局画布算，此时块都在托盘原位）
-            wp_edges = {}
-            for i in res["white_slots"]:
-                e = white_piece_edges(canvas, slots[i], pw, ph)
-                wp_edges[i] = e
-                print(f"  白块槽位#{i} 齿型 {e}  flat数={sum(1 for v in e.values() if v == 0)}")
-
-            def border_ok(edges, cell):
-                """边界格必须有对应侧直边；内部侧不能有直边。"""
-                r, c = cell
-                need = {}
-                if r == 0:
-                    need["top"] = 0
-                elif r == rows - 1:
-                    need["bottom"] = 0
-                else:
-                    need["top"] = "nonflat"; need["bottom"] = "nonflat"
-                # 左右同理
-                sides = dict(need)
-                if c == 0:
-                    sides["left"] = 0
-                elif c == cols - 1:
-                    sides["right"] = 0
-                else:
-                    sides["left"] = "nonflat"; sides["right"] = "nonflat"
-                for s, want in sides.items():
-                    v = edges[s]
-                    if want == 0 and v != 0:
-                        return False
-                    if want == "nonflat" and v == 0:
-                        return False
-                return True
-
-            # 生成候选 (槽位, 格子)，按约束满足优先
-            cands = []
-            for i in res["white_slots"]:
-                for cell in white_cells:
-                    cands.append((0 if border_ok(wp_edges[i], cell) else 1, i, cell))
-            cands.sort()
-
-            tried = set()
-            for _, i, cell in cands:
-                if cur >= tot:
-                    break
-                if (i, cell) in tried:
-                    continue
-                tried.add((i, cell))
-                cv = to_bgr(page.evaluate(JS_CANVAS_PNG))
-                loc = locate_piece_white(cv, L, pw, ph, slots[i])
-                if loc is None:
-                    continue
-                sx, sy = css_xy(rect, loc["cx"], loc["cy"])
-                tx, ty = css_xy(rect, L["board"]["x"] + cell[1] * pw + pw / 2,
-                                L["board"]["y"] + cell[0] * ph + ph / 2)
-                before = cur
-                drag(page, sx, sy, tx, ty, delay=args.slow)
-                time.sleep(0.10)
-                cur, tot = parse_progress(page.evaluate(JS_PROGRESS))
-                if cur > before:
-                    print(f"  白块#{i} -> {cell} ✅ 进度 {cur}/{tot}")
-                    white_cells.remove(cell)
-                else:
-                    print(f"  白块#{i} 试 {cell} ✗")
-                    # 送回原槽位，避免落到棋盘上"消失"
-                    park_x, park_y = css_xy(rect, slots[i]["x"] + pw / 2,
-                                            slots[i]["y"] + ph / 2)
-                    drag(page, tx, ty, park_x, park_y, delay=0)
-                    time.sleep(0.06)
-            white_cells = []
-
-        cur, tot = parse_progress(page.evaluate(JS_PROGRESS))
-        if shots:
-            cv2.imwrite(str(shots / "03_final.png"), to_bgr(page.evaluate(JS_CANVAS_PNG)))
-            page.screenshot(path=str(shots / "04_page.png"))
-
-        elapsed = round(time.time() - t_start, 1)
-        print(f"\n=== 结果 {cur}/{tot} | 用时 {elapsed}s | "
-              f"{'🎉 通关' if cur == tot else '未完成'} ===")
         if args.headful:
-            try:
-                input("按回车关闭…")
-            except EOFError:
-                pass
+            if args.auto_close:
+                page.wait_for_timeout(1500)
+            elif sys.stdin and sys.stdin.isatty():
+                try:
+                    input("按回车关闭…")
+                except (EOFError, KeyboardInterrupt):
+                    pass
         if ctx is not None:
             page.close()          # 关页面才会落盘视频
             ctx.close()
         browser.close()
-        return 0 if cur == tot else 1
+        all_ok = all(c == t and t > 0 for _, _, c, t, _ in summary)
+        return 0 if all_ok else 1
 
 
 if __name__ == "__main__":

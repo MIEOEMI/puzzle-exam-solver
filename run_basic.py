@@ -3,9 +3,9 @@
 求解器：solver_core.Analysis（模板匹配 + 匈牙利全局指派 + 锚点顺序）
         white_shape（白块齿型约束）
 用法：
-    python run_basic.py                          # 默认 Part3 · 5×5
-    python run_basic.py --part 1 --diff 25       # 全照片 5×5
-    python run_basic.py --part 2 --diff 16       # 全白 4×4
+    python run_basic.py                          # 默认一口气依次跑完全部 9 个关卡（Part 1/2/3 × 9/16/25）
+    python run_basic.py --part 3 --diff 25       # 单独跑混合 5×5
+    python run_basic.py --part 1                 # 跑第 1 部分的 9 / 16 / 25
     python run_basic.py --no-yolo                # 纯 OpenCV
 """
 import sys

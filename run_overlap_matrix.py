@@ -28,6 +28,19 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 RUNNER = HERE / "solver" / "run_overlap.py"
 
+# 汇总表里要打 ✅/❌：Windows 控制台默认 GBK，不先切 UTF-8 会直接崩
+sys.path.insert(0, str(HERE / "solver"))
+try:
+    from console import force_utf8
+except Exception:
+    def force_utf8():
+        for s in (sys.stdout, sys.stderr):
+            try:
+                s.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+force_utf8()
+
 
 def parse_diffs(s: str) -> list[int]:
     return [int(x) for x in s.split(",") if x.strip()]
@@ -56,7 +69,7 @@ def main() -> int:
     ap.add_argument("--ident-min", default="0.55")
     args = ap.parse_args()
 
-    outdir = Path(args.outdir or f"/tmp/bonus_matrix_{args.mode}")
+    outdir = Path(args.outdir or (HERE / "runs" / f"bonus_matrix_{args.mode}"))
     outdir.mkdir(parents=True, exist_ok=True)
     summary = outdir / "SUMMARY.md"
     summary.write_text(

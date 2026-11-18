@@ -118,14 +118,43 @@ def center_stats(canvas, slot, pw, ph, frac=0.30):
 
 
 def is_white_piece(canvas, slot, pw, ph):
-    """纯白块判定：块中心区是纯 255。
-
-    实测分界非常干净：真白块中心 sat=0 std=0 mean=255.0，
-    次低的照片块 sat=4.8。所以用 sat<3 / std<3 / mean>250 卡死，不会误判。
+    """纯白块判定：
+    1) 块中心区 (30%~70%，避开最深 25.3% 的四边凹槽) 是纯 255；
+    2) 四个外角区 (6%~20% 与 80%~94%，完全在四边凹槽 26%~74% 范围外) 纯白像素占比 >= 80%；
+    3) 内区 (8%~92%) 彩色像素占比 < 1.5% 且纯白像素占比 >= 65%。
+    既不会因 1~2 个凹槽描边像素误杀真白块，又能 100% 排除中心碰巧是白底的照片块。
     """
-    st = center_stats(canvas, slot, pw, ph)
+    st = center_stats(canvas, slot, pw, ph, frac=0.30)
     white = st["sat"] < 3.0 and st["std"] < 3.0 and st["mean"] > 250.0
-    return white, st
+    if not white:
+        return False, st
+
+    H, W = canvas.shape[:2]
+    sx, sy = float(slot["x"]), float(slot["y"])
+    for fx0, fx1 in ((0.06, 0.20), (0.80, 0.94)):
+        for fy0, fy1 in ((0.06, 0.20), (0.80, 0.94)):
+            x0 = max(0, int(round(sx + pw * fx0)))
+            x1 = min(W, int(round(sx + pw * fx1)))
+            y0 = max(0, int(round(sy + ph * fy0)))
+            y1 = min(H, int(round(sy + ph * fy1)))
+            if x1 - x0 >= 3 and y1 - y0 >= 3:
+                c_crop = canvas[y0:y1, x0:x1]
+                w_ratio = float(((c_crop[..., 0] > 245) & (c_crop[..., 1] > 245) & (c_crop[..., 2] > 245)).mean())
+                if w_ratio < 0.80:
+                    return False, st
+
+    ix0 = max(0, int(round(sx + pw * 0.08)))
+    ix1 = min(W, int(round(sx + pw * 0.92)))
+    iy0 = max(0, int(round(sy + ph * 0.08)))
+    iy1 = min(H, int(round(sy + ph * 0.92)))
+    if ix1 - ix0 >= 6 and iy1 - iy0 >= 6:
+        inner = canvas[iy0:iy1, ix0:ix1].astype(np.int16)
+        chroma = inner.max(axis=2) - inner.min(axis=2)
+        w_inner = float(((inner[..., 0] > 245) & (inner[..., 1] > 245) & (inner[..., 2] > 245)).mean())
+        if float((chroma > 20).mean()) > 0.015 or w_inner < 0.65:
+            return False, st
+
+    return True, st
 
 
 def is_white_cell(img):
@@ -153,15 +182,32 @@ def split_reference(ref, rows, cols):
 
 
 def template_score(pad, cell_img, pw, ph):
-    """在 pad（槽位外扩区）里搜 cell 模板，返回 (NCC, dx, dy)。dx/dy 相对 pad 左上角。"""
-    tmpl = cv2.resize(cell_img, (int(round(pw)), int(round(ph))),
-                      interpolation=cv2.INTER_AREA)
-    if pad.shape[0] < tmpl.shape[0] or pad.shape[1] < tmpl.shape[1]:
-        return -1.0, 0, 0
-    res = cv2.matchTemplate(pad, tmpl, cv2.TM_CCOEFF_NORMED)
-    res = np.nan_to_num(res, nan=-1.0)
-    _, mx, _, loc = cv2.minMaxLoc(res)
-    return float(mx), int(loc[0]), int(loc[1])
+    """在 pad（槽位外扩区）里搜 cell 模板，返回 (NCC, dx, dy)。dx/dy 相对 pad 左上角。
+
+    关键改进：
+      1) 同时对 pad 和 tmpl 内缩相同边距 (mx, my)，这样搜索范围严格限制在 [-PAD, +PAD] (±8px)
+         真实抖动范围内，绝不会在纯色背景上滑偏几十像素导致落子脱靶。
+      2) 同时计算 8% 内缩（常规区）与 22% 内缩（完全避开四边凹槽黑底的核心区），取相关度高者。
+    """
+    w_full, h_full = int(round(pw)), int(round(ph))
+    tmpl = cv2.resize(cell_img, (w_full, h_full), interpolation=cv2.INTER_AREA)
+    best_sc, best_dx, best_dy = -1.0, PAD, PAD
+    for frac in (0.08, 0.22):
+        mx = max(2, int(round(w_full * frac)))
+        my = max(2, int(round(h_full * frac)))
+        tmpl_in = tmpl[my:h_full - my, mx:w_full - mx]
+        pad_in = pad[my:pad.shape[0] - my, mx:pad.shape[1] - mx]
+        if tmpl_in.size == 0 or pad_in.shape[0] < tmpl_in.shape[0] or pad_in.shape[1] < tmpl_in.shape[1]:
+            continue
+        res = cv2.matchTemplate(pad_in, tmpl_in, cv2.TM_CCOEFF_NORMED)
+        res = np.nan_to_num(res, nan=-1.0)
+        _, mx_val, _, loc = cv2.minMaxLoc(res)
+        sc = float(mx_val)
+        if sc > best_sc:
+            best_sc = sc
+            best_dx = int(loc[0])
+            best_dy = int(loc[1])
+    return best_sc, best_dx, best_dy
 
 
 # ---------------------------------------------------------------- 视觉分析
@@ -191,7 +237,7 @@ class Analysis:
         y1 = min(self.ch, int(round(slot["y"] + self.ph)) + PAD)
         return self.canvas[y0:y1, x0:x1], (x0, y0)
 
-    def match_photo_pieces(self, classifier=None, class_bonus=0.20,
+    def match_photo_pieces(self, classifier=None, class_bonus=0.08,
                            cell_classifier=None):
         """照片块 vs 照片格 -> 全局最优指派。
 
@@ -205,15 +251,34 @@ class Analysis:
         stats_all, pads = {}, {}
         for i, slot in enumerate(self.L["slots"]):
             pad, origin = self.crop_pad(slot)
-            # 空槽位（块数 < 槽位数时会出现）：格子区几乎全黑，直接跳过
+            # 空槽位（块数 < 槽位数时会出现）：格子区几乎全黑，直接跳过。
+            # 注意：题库里有黑底照片（如 cup-15 占空比仅 0.26、desktop-8 约 0.45），
+            # 真空槽只会有邻块凸齿侵入边缘（实测 <= 0.03），因此阈值取 0.12。
             inner = self.canvas[int(round(slot["y"])):int(round(slot["y"] + self.ph)),
                                 int(round(slot["x"])):int(round(slot["x"] + self.pw))]
-            if inner.size == 0 or fg_mask(inner).mean() < 0.5:
+            if inner.size == 0 or fg_mask(inner).mean() < 0.12:
                 continue
             white, st = is_white_piece(self.canvas, slot, self.pw, self.ph)
+            # 若参考图里根本没有纯白格（Part 1 全照片），绝不把白底/白心照片分进 white_slots
+            if not self.white_cells:
+                white = False
             stats_all[i] = st
             pads[i] = (pad, origin)
             (white_slots if white else photo_slots).append(i)
+
+        # 混合模式（既有照片格又有白格）下，站点只生成照片诱饵，真白块数量恒等于白格数。
+        # 若某张白底/白心照片中心恰好全白混入 white_slots，按整块纯白像素占比挑出真白块，其余归还 photo_slots。
+        if self.white_cells and self.photo_cells and len(white_slots) > len(self.white_cells):
+            def _white_ratio(si):
+                s = self.L["slots"][si]
+                crop = self.canvas[int(round(s["y"])):int(round(s["y"] + self.ph)),
+                                   int(round(s["x"])):int(round(s["x"] + self.pw))]
+                return float(((crop[..., 0] > 248) & (crop[..., 1] > 248) & (crop[..., 2] > 248)).mean())
+            white_slots.sort(key=lambda si: -_white_ratio(si))
+            extra = white_slots[len(self.white_cells):]
+            white_slots = white_slots[:len(self.white_cells)]
+            photo_slots.extend(extra)
+            photo_slots.sort()
 
         cells = self.photo_cells
         score = np.full((len(photo_slots), len(cells)), -2.0, dtype=np.float32)
@@ -231,16 +296,24 @@ class Analysis:
         #   格子是**完整物体**（参考图切出来的 320×240）-> 用检测模型，准确
         #   拼图块是**局部碎片**（几十像素的裁片）-> 检测模型会乱认，用分类模型
         self.class_hits = 0
-        if classifier is not None or cell_classifier is not None:
+        if (classifier is not None or cell_classifier is not None) and cells and photo_slots:
             cclf = cell_classifier or classifier
             pclf = classifier or cell_classifier
-            cell_cls = [cclf.predict(c["img"], key=(c["row"], c["col"]))[0]
-                        for c in cells]
-            for a, i in enumerate(photo_slots):
-                slot = self.L["slots"][i]
-                crop = self.canvas[int(round(slot["y"])):int(round(slot["y"] + self.ph)),
-                                   int(round(slot["x"])):int(round(slot["x"] + self.pw))]
-                name = pclf.predict(crop, key=("piece", i))[0]
+            cell_preds = cclf.predict_many(
+                [c["img"] for c in cells],
+                keys=[(c["row"], c["col"]) for c in cells],
+            )
+            cell_cls = [p[0] for p in cell_preds]
+            piece_crops = [
+                self.canvas[int(round(self.L["slots"][i]["y"])):int(round(self.L["slots"][i]["y"] + self.ph)),
+                            int(round(self.L["slots"][i]["x"])):int(round(self.L["slots"][i]["x"] + self.pw))]
+                for i in photo_slots
+            ]
+            piece_preds = pclf.predict_many(
+                piece_crops,
+                keys=[("piece", i) for i in photo_slots],
+            )
+            for a, (name, _) in enumerate(piece_preds):
                 for b, cell_name in enumerate(cell_cls):
                     if b < score.shape[1] and cell_name == name and score[a, b] > 0:
                         score[a, b] += class_bonus
@@ -271,7 +344,9 @@ class Analysis:
             pad, (px, py) = self.crop_pad(slot)
             inner = self.canvas[int(round(slot["y"])):int(round(slot["y"] + self.ph)),
                                 int(round(slot["x"])):int(round(slot["x"] + self.pw))]
-            white, st = is_white_piece(inner)
+            if inner.size == 0 or fg_mask(inner).mean() < 0.12:
+                continue
+            white, st = is_white_piece(self.canvas, slot, self.pw, self.ph)
 
             if white:
                 white_slots.append(i)

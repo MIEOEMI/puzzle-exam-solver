@@ -1,9 +1,9 @@
 """附加题入口 B：初始居中开局（碎片堆在棋盘中央，需先分开）。
 
-求解器：run_overlap（同重叠，但暂存区与剥离策略不同），与基础题不同。
+求解器：run_overlap（独立黑底检验台 + 边带暂存 + 匈牙利全局指派 + 白块齿型约束）。
 用法：
-    python run_bonus_center.py                     # 混合 · 5×5
-    python run_bonus_center.py --diff 9            # 混合 · 3×3
+    python run_bonus_center.py                     # 默认依次跑完初始居中全部 9 关（Part 1/2/3 × 9/16/25）
+    python run_bonus_center.py --part 3 --diff 25  # 单独跑混合 · 5×5
 """
 import sys
 from pathlib import Path

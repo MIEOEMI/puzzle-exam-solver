@@ -157,7 +157,8 @@ def export(page, outdir=None, rows=5, cols=5, n_decoys=5):
             continue
         crop = canvas[y0:y1, x0:x1].copy()
         # 槽位比块多：棋盘外框能摆 32 个槽，实际只有 30 块，空槽位要跳过
-        if fg_mask(crop).mean() < 0.5:
+        # （黑底照片如 cup-15 占空比约 0.26，真空槽 <= 0.03，故取 0.12）
+        if fg_mask(crop).mean() < 0.12:
             continue
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
         h, w = crop.shape[:2]

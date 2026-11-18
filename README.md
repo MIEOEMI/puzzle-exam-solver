@@ -25,8 +25,8 @@
 | 代码模拟鼠标操作 | ✅ 真实鼠标事件（mousedown → mousemove → mouseup） |
 | Part 3 混合模式 | ✅ |
 | 5×5 难度 | ✅ 25 格 + 5 诱饵，稳定通关 |
-| 重叠开局（附加） | 🟡 部分可用：`solver/run_overlap.py`，实测 14–17/25，未稳定通关 |
-| 居中开局（附加） | 🟡 同上（`--mode center`） |
+| 重叠开局（附加） | 🟡 可完整跑通、不崩不卡：`run_bonus_overlap.py`。识别仍是瓶颈，**未稳定通关**（原因见 §8） |
+| 居中开局（附加） | 🟡 同上（`run_bonus_center.py`） |
 
 ---
 
@@ -42,6 +42,7 @@
 | **真实指针才能吸附** | `checkSnap` 要求 `board.dragging === piece`，合成事件无效 |
 | **诱饵块** | 5×5 时托盘 30 块 = 25 格 + 5 块混淆件，诱饵放不进任何格子 |
 | **拖拽事件** | canvas 上的 `mousedown` + window 上的 `mousemove` / `mouseup` |
+| **StateGuard 状态对账**（2026-11-16 版新增） | 每 1.2s 调一次 `board.verifyState()`：公开字段和内部账本对不上就把 `board.locked = true`，之后 `beginDrag` / `registerMove` / `checkSnap` 全部直接 return —— 表现就是**鼠标在动，却一块都吸不上**。合成事件（`isTrusted === false`）同样判篡改 |
 
 ---
 
@@ -188,27 +189,66 @@ YOLO 是加分项和语义校验，不在解题关键路径上，模型出问题
 
 ### 环境
 
-```bash
-python3 -m venv venv
-./venv/bin/pip install -r requirements.txt
+```powershell
+# Windows（PowerShell）
+python -m venv venv
+.\venv\Scripts\pip install -r requirements.txt
 # 浏览器用系统 Chrome，不需要 playwright install chromium
 ```
 
+```bash
+# macOS / Linux
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
+```
+
+### 先自检，再跑
+
+```powershell
+python doctor.py               # 逐项检查 Python/依赖/Chrome 能否启动/站点速度/导入链
+python doctor.py --start-test  # 只实测"开局"这一段，量出准备中要几秒
+```
+
+`doctor.py --start-test` 直接回答「为什么卡在选择难度界面」：
+它把同一段开局逻辑跑一遍，打印 `准备中 0s… / 10s… / 成功 0/25，用时 11.8s`。
+站点素材下载慢（实测单张 0.3–2.4s，开局要下 55 张）时这一步就是十几秒到几十秒。
+
 ### 一键跑
 
-```bash
-# 无头跑 Part 3 · 5×5
-./venv/bin/python solver/run_exam.py
+```powershell
+# Part 3 · 5×5，弹窗口看过程（默认有头）
+python run_basic.py
 
-# 弹窗口（看得见操作过程）
-./venv/bin/python solver/run_exam.py --headful --slow 0.05
+# 无头跑
+python run_basic.py --no-headful
 
-# 录屏
-./venv/bin/python solver/run_exam.py --video ./video_out --shots ./shots
+# 放慢，方便肉眼跟
+python run_basic.py --slow 0.05
+
+# 录屏 + 截图
+python run_basic.py --video .\video_out --shots .\shots
 
 # 其他部分/难度
-./venv/bin/python solver/run_exam.py --part 1 --diff 16
+python run_basic.py --part 1 --diff 25
+python run_basic.py --part 2 --diff 16
+
+# 网络特别慢时，把开局等待放宽（默认 90s）
+python run_basic.py --start-timeout 180
 ```
+
+> 入口是仓库根目录的 `run_basic.py`，不要在别的目录运行；它自己注入 `solver/` 的路径。
+
+### 附加题入口
+
+```powershell
+python run_bonus_overlap.py --diff 9          # 初始重叠 · 3×3（先小格试）
+python run_bonus_center.py  --diff 9          # 初始居中 · 3×3
+python run_overlap_matrix.py --mode overlap --diffs 9,16 --rounds 2 --pause 5
+#   汇总写到 runs/bonus_matrix_<mode>/SUMMARY.md，每局日志同目录
+```
+
+三个入口与基础题共用同一套窗口/编码/开局逻辑：默认最大化、`--no-headful` 无头、
+`--start-timeout` 控制等待。附加题结果见 §8。
 
 ### 输出
 
@@ -242,6 +282,10 @@ shots/04_page.png           整页截图
 | 诱饵靠阈值筛不掉 | 诱饵与真块低分区重叠 | 改用匈牙利全局指派，落选者即诱饵 |
 | 吸附阈值太紧 | 差一格就吸不上 | 0.14×格子宽 ≈ 11px，必须精确瞄格心 |
 | 合成事件无效 | 派发 MouseEvent 不吸附 | `checkSnap` 校验 `board.dragging === piece`，只有真实指针按下才置位 |
+| **一直卡在选择难度界面 / 准备中…** | 浏览器停在开局面板，进度一直是 `0 / 9` | 站点 `startPart()` 里 `await loadTheme()` 要等 25 张照片 + 5 张诱饵 + 25 张参考图**全部 onload** 才把进度切成 `0 / 25`（实测 10–40s）。旧代码只等 10s，超时后又去点按钮——但此时 `busy=true`、按钮 `disabled`，点击被静默吞掉，重试 4 次全落空后抛「开局失败」。现在 `start_exam()` 只点一次、轮询到 `0/diff`（默认 90s，`--start-timeout` 可调），真超时才整页重载重来 |
+| Windows 控制台 `UnicodeEncodeError: 'gbk' codec` | 跑到一半整个进程崩，或 `doctor.py` 第一行就崩 | 控制台默认 cp936，打印 `✅ / ❌ / 🎉` 立刻抛异常。现在入口统一调 `solver/console.py:force_utf8()`，把 stdout 切 UTF-8 并把控制台代码页设成 65001 |
+| **鼠标在动，但一块都吸不上（2026-11-18 版本）** | 开局正常、屏幕上块也会被拖着走，进度永远 `0 / 25`，日志全是 ❌ | 站点新版加了 `StateGuard`：`startPart()` 是**先** `setDimensions(5,5)`、**再** `await` 下 25+5+25 张图、最后才 `buildPieces()`。这段窗口里棋盘还是上一局的 9 块，1.2s 一次的对账看到 `cells 9 != grid 25` → 判篡改 → `locked = true`（且 violations 会一直留着，之后每轮都锁）。修法：① 素材改由本地 `dataset/raw` 供给（`install_catalog_cache`），开局从 40–70s 降到 0.5s，窗口短到基本撞不上；② 开局后查 `data-tamper`，撞上了就整页重载重开（最多 5 次）。实测 10 局：9×25/25 + 1×24/25，重试分别触发过 1 次和 2 次 |
+| 开局点了没反应，进度还是上一局的 `0 / 9` | 拿 9 格棋盘去分析，报告"一块都找不到" | 演示局默认 `0 / 9`，和"没开局"长得一模一样；必须等到 `0 / 25` 才算开好（见上一条） |
 
 ---
 
@@ -262,6 +306,7 @@ shots/04_page.png           整页截图
 │   ├── run_overlap.py        附加题实现（堆叠剥离 + 暂存识别）
 │   ├── white_shape.py        白块齿型判定
 │   ├── yolo_check.py         YOLO 封装（检测/分类双模型）
+│   ├── console.py            Windows 控制台 UTF-8 修正（emoji 不再崩）
 │   └── layout.py             布局几何（独立可验证版）
 │
 ├── browser/                  浏览器驱动（只做页面操作，不含算法）
@@ -321,7 +366,25 @@ from solver_core import compute_layout, drag, fg_mask
 |---|---|
 | 依赖站点结构 | 布局几何是按当前版本源码复现的，站点改版需同步调整 `layout.py` |
 | 白块靠试错兜底 | 齿型判定在块较小时有噪声，最坏情况会多试几次（实测每局额外 5–15 次拖拽） |
-| 未做附加题 | 重叠开局、居中开局未实现 |
+| 附加题（重叠/居中）能跑完但通不了关 | 见下 |
+
+### 附加题为什么还是过不了
+
+附加题只能在**演示页**（`?mode=exam` 之外的页面）开重叠/居中，而演示页的参考图用的是
+`alternatePhoto()`：**同一类别的另一张照片**。于是：
+
+| | 基础题（考核页 · 混合） | 附加题（演示页） |
+|---|---|---|
+| 块 → 格子的判定 | 像素相关 + YOLO 类别做匈牙利全局指派 | 只能靠类别（像素相关实测 0.40 左右，全贴同分） |
+| 同类别多格时 | 全局指派一次定完，不会冲突 | 分不清是哪一格，只能试 |
+
+现在的做法：先按"格子内 1/4 偏移点"把每块摊开（远离吸附阈值、互不压），
+用分类模型认类别（整张照片，实测 0.94–0.99），再按锚点顺序归位，最后"块 × 空格"兜底试放。
+这条链路**不再崩、不再卡**，但同类别多格时仍会大面积试错，一局 9 格约 80–150 秒、多数局停在 0–3/9。
+
+要真正解出来，缺的是"这一块属于哪一格"的独立证据，可走的方向：
+站点在放置成功前不会暴露答案，只能靠**排除法 + 吸附反馈**做搜索，
+或者按 `docs/BONUS_overlap_center.md` 的思路把搜索空间约束到同类别格子内。
 
 ---
 
