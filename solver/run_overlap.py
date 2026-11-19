@@ -237,6 +237,7 @@ def inspect_isolated_piece(canvas, ix0, iy0, ix1, iy1, pw, ph, tmpl_of,
             tmpl_in = tmpl_full[my:h_full - my, mx:w_full - mx]
             pad_in = pad_crop[my:pad_crop.shape[0] - my, mx:pad_crop.shape[1] - mx]
             if (tmpl_in.shape[0] < 8 or tmpl_in.shape[1] < 8
+                    or float(tmpl_in.std()) < 2.0
                     or pad_in.shape[0] < tmpl_in.shape[0]
                     or pad_in.shape[1] < tmpl_in.shape[1]):
                 continue
@@ -407,25 +408,30 @@ def solve_one_bonus_level(page, part_id, diff, mode, piece_clf, cell_clf, args, 
         ix1 = min(CW, int(inspect_pt[0] + pw * 1.15))
         iy1 = min(int(by - 3), int(CH))
 
-        # 检验台必须容得下整块（含凸齿），否则块会被画布上边界裁掉，
-        # 模板匹配恒为 -1.00，全部被误判成诱饵 -> 整关 0/N。
-        # 实测：画布 919x590 时检验台仅 68px，而 3x3 块高 149px，必然失败。
+        # 检验台必须容得下整块（含上下双凸齿，总高约 1.51 * ph），否则块会被画布上边界裁掉，
+        # 模板匹配恒为 -1.00，全部被误判成诱饵 -> 整关失败。
         bench_h = iy1 - iy0
-        need_h = ph * 1.35
+        need_h = ph * 1.52
         if bench_h < need_h:
-            need_canvas_h = int(by * 2 + bh + 20)
+            need_canvas_h = int(math.ceil(need_h * 2 + bh + 16))
             print(f"[检验台不足] 画布 {CW}x{CH} 棋盘高 {bh:.0f} -> 上方净空 {bench_h}px，"
-                  f"而块高 {ph:.0f}px 需要 >= {need_h:.0f}px")
-            print(f"             附加题依赖『棋盘上方黑底净空』做单块识别，屏幕太矮会整关失败。")
-            print(f"             建议：屏幕高度 >= 1200，或用虚拟屏运行：")
-            print(f'               xvfb-run -a -s "-screen 0 1920x1200x24" python run_bonus_overlap.py')
-            print(f"             该关仍会继续跑，但结果大概率不完整。")
+                  f"而块高 {ph:.0f}px（含双凸齿）需要 >= {need_h:.0f}px（画布高需 >= {need_canvas_h}px）")
+            print(f"             建议：去掉 --dpr 限制以启用自动 DPR 适配，或手动传 --dpr 2。")
     else:
         inspect_pt = (bx + bw + (CW - (bx + bw)) * 0.53, CH * 0.50)
         ix0 = max(int(bx + bw + 24), int(inspect_pt[0] - pw * 1.20))
         iy0 = max(0, int(inspect_pt[1] - ph * 1.45))
         ix1 = CW
         iy1 = min(CH, int(inspect_pt[1] + ph * 1.45))
+
+        bench_w = ix1 - ix0
+        bench_h = iy1 - iy0
+        need_w = pw * 1.52
+        need_h = ph * 1.52
+        if bench_w < need_w or bench_h < need_h:
+            print(f"[检验台不足] 画布 {CW}x{CH} -> 右侧净空 {bench_w}x{bench_h}px，"
+                  f"而块尺寸 {pw:.0f}x{ph:.0f}px（含双凸齿）需要 >= {need_w:.0f}x{need_h:.0f}px")
+            print(f"             建议：去掉 --dpr 限制以启用自动 DPR 适配，或手动传 --dpr 2。")
 
     # 废件丢弃点：棋盘正下方最左端
     trash_pt = (bx + pw * 0.30, CH - ph * 0.52)
@@ -597,7 +603,7 @@ def solve_one_bonus_level(page, part_id, diff, mode, piece_clf, cell_clf, args, 
             has_white_cells=has_white_cells, pure_white_mode=pure_white_mode,
             piece_clf=piece_clf, cell_class=cell_class,
             exclude=(placed | set(parked_photo.keys())) if mode == "overlap" else placed,
-            decoy_thr=(0.74 if mode == "overlap" else 0.45),
+            decoy_thr=(0.58 if mode == "overlap" else 0.45),
         )
         kind = info["kind"]
         if kind == "empty":
@@ -693,11 +699,14 @@ def solve_one_bonus_level(page, part_id, diff, mode, piece_clf, cell_clf, args, 
                             break
                     if not handled:
                         drag(page, *css_xy(rect, cur_pos[0], cur_pos[1]), *css_xy(rect, trash_pt[0], trash_pt[1]), delay=args.slow)
-            else:
+            elif info["raw_ncc"] >= 0.65:
                 tx, ty = cell_centre(cell)
                 drag(page, *css_xy(rect, cx, cy), *css_xy(rect, tx, ty), delay=args.slow)
                 parked_photo[cell] = (tx, ty)
                 print(f"    暂存内圈格 {cell} 等待邻居锚点")
+            else:
+                print(f"  [照片诱饵] raw={info['raw_ncc']:.2f} -> 丢弃废件区")
+                drag(page, *css_xy(rect, cx, cy), *css_xy(rect, trash_pt[0], trash_pt[1]), delay=args.slow)
         else:
             all_park = side_slots + overlap_park_slots
             slot_pt = all_park[min(side_slot_idx, len(all_park) - 1)]
@@ -867,9 +876,23 @@ def main():
     ap.add_argument("--shots", default=None)
     ap.add_argument("--ident-min", type=float, default=0.52)
     ap.add_argument("--no-yolo", action="store_true")
+    ap.add_argument("--pause", type=float, default=5.0,
+                    help="每局通关后的中间停顿秒数（默认 5.0s，含通关弹窗展示与局间停顿）")
+    ap.add_argument("--pause-enter", action="store_true",
+                    help="每局结束后等待终端按回车再进入下一关")
+    ap.add_argument("--evidence-dir", default=None,
+                    help="每局网站 JSON 完成证明导出目录（默认 runs/evidence/<mode>_<时间>/）")
+    ap.add_argument("--no-evidence", action="store_true",
+                    help="关闭自动导出每局网站 JSON 完成证明")
     ap.add_argument("--auto-close", action="store_true",
                     help="通关后展示 1.5s 自动关闭窗口")
     args = ap.parse_args()
+
+    from run_exam import (
+        default_evidence_dir,
+        export_round_evidence_and_pause,
+        install_catalog_cache,
+    )
 
     theme_to_part = {"animals": 1, "white": 2, "mixed": 3}
     if args.part is None and args.theme in theme_to_part:
@@ -882,6 +905,9 @@ def main():
     diffs = [args.diff] if args.diff is not None else [9, 16, 25]
     schedule = [(pt, df) for pt in parts for df in diffs]
     shots_root = Path(args.shots) if args.shots else None
+    evidence_dir = None if args.no_evidence else (
+        Path(args.evidence_dir) if args.evidence_dir else default_evidence_dir(args.mode)
+    )
 
     t_start = time.time()
     with sync_playwright() as p:
@@ -891,29 +917,47 @@ def main():
         if args.maximize and args.headful:
             aw, ah, real_dpr = screen_metrics(browser)
             vw_css, vh_css = aw, max(600, ah - 8)
-            scale = args.dpr or real_dpr
-            print(f"[窗口] 屏幕 {aw}x{ah} · DPR {scale:g} -> 视口 {vw_css}x{vh_css}")
+            base_dpr = real_dpr
         else:
             vw_css, vh_css = args.vw, args.vh
-            scale = args.dpr or 1.0
+            base_dpr = 1.0
+
+        # 站点棋盘高度上限 550px 按 Canvas 位图像素计算（CSS 尺寸 × DPR）。
+        # 若未显式传 --dpr，当当前屏幕/视口下预估画布位图不足 1820×1180 时，
+        # 自动抬高上下文 DPR，保证 1280×800 / 1080p / 无头环境下检验台与暂存位同样充裕。
+        if args.dpr is not None:
+            scale = args.dpr
+        else:
+            est_cw = max(500.0, vw_css * 0.73)
+            est_ch = max(360.0, vh_css - 210.0)
+            need_scale = max(1820.0 / est_cw, 1180.0 / est_ch)
+            auto_scale = min(3.0, math.ceil(need_scale * 10.0) / 10.0)
+            scale = max(base_dpr, auto_scale)
+
+        if args.maximize and args.headful:
+            note = f"（自动适配自 {base_dpr:g}）" if (args.dpr is None and scale > base_dpr + 1e-6) else ""
+            print(f"[窗口] 屏幕 {aw}x{ah} · DPR {scale:g}{note} -> 视口 {vw_css}x{vh_css}")
+        else:
+            note = f"（自动适配）" if (args.dpr is None and scale > base_dpr + 1e-6) else ""
+            print(f"[窗口] 视口 {vw_css}x{vh_css} · DPR {scale:g}{note}")
         viewport = {"width": vw_css, "height": vh_css}
 
+        ctx_kwargs = {
+            "viewport": viewport,
+            "device_scale_factor": scale,
+            "accept_downloads": True,
+        }
         if args.video:
             Path(args.video).mkdir(parents=True, exist_ok=True)
-            ctx = browser.new_context(viewport=viewport, device_scale_factor=scale,
-                                      record_video_dir=args.video,
-                                      record_video_size={"width": args.vw, "height": args.vh})
-            page = ctx.new_page()
-        else:
-            ctx = None
-            page = browser.new_page(viewport=viewport, device_scale_factor=scale)
+            ctx_kwargs["record_video_dir"] = args.video
+            ctx_kwargs["record_video_size"] = {"width": args.vw, "height": args.vh}
+        ctx = browser.new_context(**ctx_kwargs)
+        page = ctx.new_page()
 
         if args.maximize and args.headful:
             maximize_window(page)
 
         page.on("dialog", lambda d: d.accept())
-
-        from run_exam import install_catalog_cache
         install_catalog_cache(page.context)
 
         # 全部关卡开始前只加载并预热一次 YOLO
@@ -936,6 +980,7 @@ def main():
                 print(f"[warn] YOLO 未启用：{e}")
 
         summary = []
+        exported_files = []
         part_names = {1: "Part 1 · 照片", 2: "Part 2 · 纯白", 3: "Part 3 · 混合"}
         for idx, (pt, df) in enumerate(schedule):
             sub_shots = (
@@ -946,8 +991,18 @@ def main():
                 page, pt, df, args.mode, piece_clf, cell_clf, args, shots=sub_shots
             )
             summary.append((pt, df, cur, tot, dt))
-            if idx < len(schedule) - 1:
-                page.wait_for_timeout(800)
+            proof_path = export_round_evidence_and_pause(
+                page,
+                prefix=f"{idx + 1:02d}_{args.mode}_p{pt}_{df}",
+                cur=cur,
+                tot=tot,
+                evidence_dir=evidence_dir,
+                pause=args.pause,
+                pause_enter=args.pause_enter,
+                has_next=(idx < len(schedule) - 1),
+            )
+            if proof_path is not None:
+                exported_files.append(proof_path)
 
         if len(summary) > 1:
             total_dt = round(time.time() - t_start, 1)
@@ -960,6 +1015,9 @@ def main():
                 ok_s = "✅ 通关" if (c == t and t > 0) else "❌ 未完成"
                 print(f"  {part_names.get(pt, f'Part {pt}'):<14} | {r_sz}×{r_sz} ({df:>2}格) | "
                       f"{c:>2}/{t:<2} | {dt:>5.1f}s | {ok_s}")
+            if evidence_dir is not None:
+                print("-" * 64)
+                print(f"网站 JSON 完成证明已导出 ({len(exported_files)}/{len(summary)} 份)：{evidence_dir}")
             print("=" * 64)
 
         if args.headful:

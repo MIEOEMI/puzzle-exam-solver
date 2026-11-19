@@ -160,11 +160,16 @@ def is_white_piece(canvas, slot, pw, ph):
 def is_white_cell(img):
     """参考图里的纯白格是真正的 255 纯白（std=0, sat=0）。
 
-    实测：真白格 mean=255.0 std=0.0 sat=0.0；
-          白底照片 mean≈230 std≈22。所以阈值必须卡死。
+    注意：混合模式 renderMixedPuzzle() 会在相邻照片格边缘画 3px 灰框，
+    切格取整可能把 1~2px 灰边切进白格外缘；内缩 5%（至少 4px）再判纯白，
+    既 100% 避开邻格边框渗色，又不会把白底照片误判为白格。
     """
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    h, w = img.shape[:2]
+    mx = min(w // 6, max(4, int(w * 0.05)))
+    my = min(h // 6, max(4, int(h * 0.05)))
+    inner = img[my:h - my, mx:w - mx] if (h - 2 * my >= 8 and w - 2 * mx >= 8) else img
+    gray = cv2.cvtColor(inner, cv2.COLOR_BGR2GRAY)
+    hsv = cv2.cvtColor(inner, cv2.COLOR_BGR2HSV)
     return (float(hsv[..., 1].mean()) < 3.0
             and float(gray.mean()) > 250.0
             and float(gray.std()) < 3.0)
@@ -197,7 +202,8 @@ def template_score(pad, cell_img, pw, ph):
         my = max(2, int(round(h_full * frac)))
         tmpl_in = tmpl[my:h_full - my, mx:w_full - mx]
         pad_in = pad[my:pad.shape[0] - my, mx:pad.shape[1] - mx]
-        if tmpl_in.size == 0 or pad_in.shape[0] < tmpl_in.shape[0] or pad_in.shape[1] < tmpl_in.shape[1]:
+        if (tmpl_in.size == 0 or float(tmpl_in.std()) < 2.0
+                or pad_in.shape[0] < tmpl_in.shape[0] or pad_in.shape[1] < tmpl_in.shape[1]):
             continue
         res = cv2.matchTemplate(pad_in, tmpl_in, cv2.TM_CCOEFF_NORMED)
         res = np.nan_to_num(res, nan=-1.0)

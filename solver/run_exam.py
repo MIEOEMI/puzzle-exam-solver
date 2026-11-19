@@ -660,6 +660,95 @@ def solve_one_level(page, part, diff, classifier, cell_classifier, args, shots=N
     return cur, tot, elapsed
 
 
+# ---------------------------------------------------------------- 完成证明导出与局间停顿
+
+def default_evidence_dir(suite: str) -> Path:
+    """默认按题型与时间戳生成本轮 JSON 完成证明保存目录。"""
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    return Path(__file__).resolve().parent.parent / "runs" / "evidence" / f"{suite}_{stamp}"
+
+
+def export_round_evidence_and_pause(
+    page,
+    *,
+    prefix: str,
+    cur: int,
+    tot: int,
+    evidence_dir: Path | None,
+    pause: float = 5.0,
+    pause_enter: bool = False,
+    has_next: bool = False,
+) -> Path | None:
+    """单局结束后：
+    1) 等通关弹窗呈现并作短暂停顿展示已完成棋盘/用时；
+    2) 通过站点「导出本场证据（JSON）」按钮触发真实下载，保存本局官网 JSON 完成证明；
+    3) 在切回开始面板显示已通关列表后再作局间停顿（可选回车手动继续）。
+    """
+    won = tot > 0 and cur >= tot
+    victory_wait = min(pause, max(0.8, round(pause * 0.65, 2))) if pause > 0 else 0.0
+    rest_wait = max(0.0, round(pause - victory_wait, 2)) if (pause > 0 and has_next) else 0.0
+
+    if won:
+        try:
+            page.wait_for_selector("#victory-modal.show", timeout=3500)
+        except Exception:
+            pass
+        if victory_wait > 0:
+            print(f"[停顿] 展示通关弹窗 {victory_wait:.1f}s…")
+            page.wait_for_timeout(int(victory_wait * 1000))
+
+    saved_path: Path | None = None
+    if evidence_dir is not None:
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            modal_btn = page.locator("#victory-modal.show #btn-play-again")
+            if modal_btn.count() > 0 and modal_btn.first.is_visible():
+                modal_btn.first.click(timeout=3000)
+                page.wait_for_timeout(120)
+
+            st = exam_status(page)
+            if not st.get("panel_open"):
+                sw_btn = page.locator("#btn-exam-switch")
+                if sw_btn.count() > 0 and sw_btn.first.is_visible():
+                    sw_btn.first.click(timeout=3000)
+                    page.wait_for_timeout(150)
+
+            exp_btn = page.locator("#btn-export-evidence")
+            exp_btn.wait_for(state="visible", timeout=3000)
+            with page.expect_download(timeout=10000) as dl_info:
+                exp_btn.click(timeout=3000)
+            download = dl_info.value
+            suggested = download.suggested_filename or "exam-evidence.json"
+            tag = "" if won else "_incomplete"
+            out_path = evidence_dir / f"{prefix}{tag}_{suggested}"
+            download.save_as(str(out_path))
+            saved_path = out_path
+
+            try:
+                payload = json.loads(out_path.read_text(encoding="utf-8"))
+                n_ev = len(payload.get("events") or [])
+                bld = (payload.get("meta") or {}).get("build", "")
+                p_info = payload.get("part") or {}
+                print(f"[证明] 已导出网站 JSON 完成证明 -> {out_path} "
+                      f"(build={bld}, part={p_info.get('id')}, events={n_ev})")
+            except Exception:
+                print(f"[证明] 已导出网站 JSON 完成证明 -> {out_path}")
+        except Exception as e:
+            print(f"[warn] 网站 JSON 完成证明导出失败 ({prefix})：{type(e).__name__}: {e}")
+
+    if rest_wait > 0:
+        print(f"[停顿] 局间停顿 {rest_wait:.1f}s，准备进入下一关…")
+        page.wait_for_timeout(int(rest_wait * 1000))
+
+    if pause_enter and has_next and sys.stdin and sys.stdin.isatty():
+        try:
+            input("按回车继续下一关…")
+        except (EOFError, KeyboardInterrupt):
+            pass
+
+    return saved_path
+
+
 # ---------------------------------------------------------------- 主流程
 
 def main():
@@ -677,6 +766,14 @@ def main():
     ap.add_argument("--max-seconds", type=float, default=300)
     ap.add_argument("--video", default=None, help="录屏目录（WebM），用于演示视频")
     ap.add_argument("--no-yolo", action="store_true", help="不加载 YOLO，只用 OpenCV")
+    ap.add_argument("--pause", type=float, default=5.0,
+                    help="每局通关后的中间停顿秒数（默认 5.0s，含通关弹窗展示与局间停顿）")
+    ap.add_argument("--pause-enter", action="store_true",
+                    help="每局结束后等待终端按回车再进入下一关")
+    ap.add_argument("--evidence-dir", default=None,
+                    help="每局网站 JSON 完成证明导出目录（默认 runs/evidence/basic_<时间>/）")
+    ap.add_argument("--no-evidence", action="store_true",
+                    help="关闭自动导出每局网站 JSON 完成证明")
     ap.add_argument("--auto-close", action="store_true",
                     help="通关后展示 1.5s 自动关闭窗口（用于连续演示）")
     ap.add_argument("--maximize", action=argparse.BooleanOptionalAction, default=True,
@@ -694,6 +791,9 @@ def main():
     diffs = [args.diff] if args.diff is not None else [9, 16, 25]
     schedule = [(pt, df) for pt in parts for df in diffs]
     shots_root = Path(args.shots) if args.shots else None
+    evidence_dir = None if args.no_evidence else (
+        Path(args.evidence_dir) if args.evidence_dir else default_evidence_dir("basic")
+    )
 
     t_start = time.time()
     with sync_playwright() as p:
@@ -710,22 +810,23 @@ def main():
             scale = args.dpr or 1.0
         viewport = {"width": vw_css, "height": vh_css}
 
+        ctx_kwargs = {
+            "viewport": viewport,
+            "device_scale_factor": scale,
+            "accept_downloads": True,
+        }
         if args.video:
             vdir = Path(args.video)
             vdir.mkdir(parents=True, exist_ok=True)
-            ctx = browser.new_context(
-                viewport=viewport,
-                device_scale_factor=scale,
-                record_video_dir=str(vdir),
-                record_video_size={"width": args.vw, "height": args.vh})
-            page = ctx.new_page()
-        else:
-            ctx = None
-            page = browser.new_page(viewport=viewport, device_scale_factor=scale)
+            ctx_kwargs["record_video_dir"] = str(vdir)
+            ctx_kwargs["record_video_size"] = {"width": args.vw, "height": args.vh}
+        ctx = browser.new_context(**ctx_kwargs)
+        page = ctx.new_page()
 
         if args.maximize and args.headful:
             maximize_window(page)
 
+        page.on("dialog", lambda d: d.accept())
         install_catalog_cache(page.context)
 
         # ---- YOLO 在全部关卡开始前只加载并预热一次
@@ -755,6 +856,7 @@ def main():
                 classifier = cell_classifier = None
 
         summary = []
+        exported_files = []
         part_names = {1: "Part 1 · 照片", 2: "Part 2 · 纯白", 3: "Part 3 · 混合"}
         for idx, (pt, df) in enumerate(schedule):
             sub_shots = (
@@ -765,8 +867,18 @@ def main():
                 page, pt, df, classifier, cell_classifier, args, shots=sub_shots
             )
             summary.append((pt, df, cur, tot, dt))
-            if idx < len(schedule) - 1:
-                page.wait_for_timeout(800)
+            proof_path = export_round_evidence_and_pause(
+                page,
+                prefix=f"{idx + 1:02d}_basic_p{pt}_{df}",
+                cur=cur,
+                tot=tot,
+                evidence_dir=evidence_dir,
+                pause=args.pause,
+                pause_enter=args.pause_enter,
+                has_next=(idx < len(schedule) - 1),
+            )
+            if proof_path is not None:
+                exported_files.append(proof_path)
 
         if len(summary) > 1:
             total_dt = round(time.time() - t_start, 1)
@@ -779,6 +891,9 @@ def main():
                 ok_s = "✅ 通关" if (c == t and t > 0) else "❌ 未完成"
                 print(f"  {part_names.get(pt, f'Part {pt}'):<14} | {r_sz}×{r_sz} ({df:>2}格) | "
                       f"{c:>2}/{t:<2} | {dt:>5.1f}s | {ok_s}")
+            if evidence_dir is not None:
+                print("-" * 64)
+                print(f"网站 JSON 完成证明已导出 ({len(exported_files)}/{len(summary)} 份)：{evidence_dir}")
             print("=" * 64)
 
         if args.headful:

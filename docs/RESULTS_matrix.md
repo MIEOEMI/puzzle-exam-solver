@@ -58,22 +58,23 @@
 
 ---
 
-## 复现条件（务必注明）
+## 复现条件与小屏自动 DPR 适配验证
 
-本表成绩在 **屏幕高度 ≥ 1200px**（画布约 1459×950）下测得。
-附加题依赖「棋盘上方黑底净空区」当检验台，屏幕太矮时检验台装不下整块，
-会整关失败（实测 1280×800 下附加题 0/9 关）。
+- 早期版本依赖高屏或高 DPR（`1707×1011 @ DPR=1.5` 下位图 `1900×1218`）；在第三方低 DPR（`DPR=1.0`）环境复验中：
+  - 基础题 **9/9 关通关（93.7s）**；
+  - 附加题在 `1280×800 @ DPR=1.0`（位图 `919×590`）因检验台仅 `67px` 报 0/9，在 `1920×1200 @ DPR=1.0`（位图 `~1459×950`）3/9 全通、其余差 1–2 块。
+- **现已根本修复**：
+  1. `solver/run_overlap.py` 新增**自动 DPR 适配**（未显式传 `--dpr` 时自动保证位图达到 `≥ 1820×1180`），并补齐 `overlap` 与 `center` 双模式检验台自检；
+  2. 修复混合模式 `is_white_cell` 邻格灰边渗色误判 + 跳过零方差（`std < 2.0`）常数模板 + 放宽 `overlap` 锚定直吸阈值至 `0.58`。
+- **修复后在 `1280×800` 无头视口（自动 DPR=2.0，位图 `1838×1196`，无需 `xvfb`）实测**：
+  - `python run_bonus_overlap.py --no-headful --pause 0 --no-evidence --auto-close`：**9/9 全部满分通关（总用时 166.6s）**；
+  - `python run_bonus_center.py --no-headful --part 2 --pause 0 --no-evidence --auto-close`：**3/3（9/16/25 格）全部满分通关（63.3s）**。
 
-复现命令：
+复现命令（默认每局停顿 **5.0 秒**并自动导出官网 JSON 完成证明至 `runs/evidence/`）：
 
 ```bash
-# 基础题：任意屏幕
-python run_basic.py --auto-close
-
-# 附加题：需要高屏，或用虚拟屏
-xvfb-run -a -s "-screen 0 1920x1200x24" python run_bonus_overlap.py --auto-close
-xvfb-run -a -s "-screen 0 1920x1200x24" python run_bonus_center.py  --auto-close
+python run_basic.py          # 基础题 9 关
+python run_bonus_overlap.py  # 附加题一（初始重叠）9 关
+python run_bonus_center.py   # 附加题二（初始居中）9 关
+python run_demo_all.py       # 三题连演 27 关
 ```
-
-独立复验记录（第三方环境，1920×1200 虚拟屏）：
-基础题 **9/9 关通关（93.7s）**；附加题重叠 **3/9 关全通**，其余多为 15/16、24/25（差 1–2 块）。

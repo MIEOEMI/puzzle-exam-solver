@@ -289,38 +289,33 @@ shots/04_page.png           整页截图
 
 ---
 
-## 六点五、运行环境要求（重要）
+## 六点五、运行环境要求与自动屏幕适配
 
 | 项 | 要求 | 说明 |
 |---|---|---|
 | Python | 3.9+ | |
-| 屏幕高度 | **≥ 1200px**（附加题） | 基础题 800px 即可 |
-| 缩放 | 任意（125%/150%/Retina 均可） | 已做画布像素 → CSS 坐标换算 |
+| 屏幕 / 视口 | **任意（含 1280×800 及无头模式）** | 附加题已支持**自动 DPR 适配**，不再强求 ≥1200px 物理屏 |
+| 缩放 | 任意（100%/125%/150%/Retina 均可） | 已做画布位图 → CSS 坐标换算 |
 | 控制台 | Windows GBK 已处理 | `solver/console.py` 强制 UTF-8 |
+| 局间停顿 & 完成证明 | 默认停顿 **5.0 秒** + 自动导出官网 JSON | 每局自动点击官网「导出本场证据（JSON）」并保存至 `runs/evidence/` |
 
-**为什么附加题要求屏幕高度 ≥ 1200px**
+**附加题为什么过去受限于屏幕高度，以及现在如何自动解决**
 
-附加题的单块识别依赖「棋盘正上方的黑底净空区」当检验台（把块拎过去、在黑底上做闭合轮廓剪影定位）。
-检验台高度 = `棋盘上沿 y 坐标 - 3`，而棋盘高度上限 550px，所以：
-
-```
-检验台高度 ≈ (画布高 - 棋盘高) / 2 ≈ (画布高 - 550) / 2
-需要 ≥ 块高 × 1.35，即画布高 ≥ 约 1050px → 屏幕高 ≥ 约 1200px
-```
-
-屏幕不够时程序会明确打印：
-
-```
-[检验台不足] 画布 919x590 棋盘高 448 -> 上方净空 67px，而块高 149px 需要 >= 202px
-             建议：屏幕高度 >= 1200，或用虚拟屏运行：
-               xvfb-run -a -s "-screen 0 1920x1200x24" python run_bonus_overlap.py
-```
-
-**无头/服务器环境**跑附加题请用虚拟屏：
+站点 `PuzzleBoard.js` 将棋盘高度上限 `550px` 固定在 **Canvas 位图像素**（`CSS 尺寸 × devicePixelRatio`）上：
+- 在低 DPR（`DPR=1.0`）小屏（如 `1280×800`）下，位图仅 `919×590`，棋盘上方净空仅 `67px`（远小于 3×3 含双凸齿块高 `~277px`），会触发 `[检验台不足]` 告警并整关失败。
+- 现在 `solver/run_overlap.py` 在未显式传 `--dpr` 时，会自动按视口尺寸抬高 Playwright 上下文的 `device_scale_factor`（确保画布位图达到 `≥ 1820×1180`，例如 `1280×800` 自动用 `DPR=2.0` -> 位图 `1838×1196`，上方净空 `320px`、右侧净空 `552px`）。实测在 **`1280×800` 无头模式（无需 `xvfb`）** 下 `run_bonus_overlap.py` **9/9 关全部满分通关（166.6s）**。
+- 若用户手动传 `--dpr 1.0` 压低分辨率，程序仍会在 `overlap`（上方净空）与 `center`（右侧净空）两种模式下自动执行检验台尺寸自检并给出提示。
 
 ```bash
-xvfb-run -a -s "-screen 0 1920x1200x24" python run_bonus_overlap.py --auto-close
-xvfb-run -a -s "-screen 0 1920x1200x24" python run_bonus_center.py  --auto-close
+# 基础题 / 附加题：任意屏幕或无头环境直接运行（默认每局停顿 5 秒并导出官网 JSON 完成证明）
+python run_basic.py
+python run_bonus_overlap.py
+python run_bonus_center.py
+python run_demo_all.py
+
+# 无头快速验证示例
+python run_bonus_overlap.py --no-headful --auto-close
+python run_bonus_center.py  --no-headful --auto-close
 ```
 
 ---

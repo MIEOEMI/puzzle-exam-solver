@@ -23,7 +23,7 @@ except Exception:
     pass
 
 
-def run_step(title: str, cmd: list[str], pause: float = 2.0) -> int:
+def run_step(title: str, cmd: list[str], pause: float = 5.0) -> int:
     print("\n" + "=" * 68)
     print(f"▶ 正在演示：{title}")
     print(f"  命令：{' '.join(cmd)}")
@@ -40,10 +40,31 @@ def main() -> int:
     ap.add_argument("--basic-diff", type=int, default=None, help="基础题指定难度（不传则默认跑全部 9/16/25）")
     ap.add_argument("--bonus-part", type=int, default=None, help="附加题指定部分（不传则默认跑全部 Part 1/2/3）")
     ap.add_argument("--bonus-diff", type=int, default=None, help="附加题指定难度（不传则默认跑全部 9/16/25）")
-    ap.add_argument("--pause", type=float, default=2.0, help="每题之间的停顿秒数")
+    ap.add_argument("--pause", type=float, default=5.0, help="每道大题之间的停顿秒数（默认 5.0s）")
+    ap.add_argument("--level-pause", type=float, default=5.0, help="每一局通关后的中间停顿秒数（默认 5.0s）")
+    ap.add_argument("--pause-enter", action="store_true", help="每局通关并导出证明后等待终端按回车继续")
+    ap.add_argument("--evidence-dir", default=None, help="统一指定网站 JSON 完成证明导出根目录")
+    ap.add_argument("--no-evidence", action="store_true", help="关闭自动导出网站 JSON 完成证明")
     args = ap.parse_args()
 
     py = sys.executable
+    common_flags: list[str] = ["--pause", str(args.level_pause)]
+    if args.pause_enter:
+        common_flags.append("--pause-enter")
+    if args.no_evidence:
+        common_flags.append("--no-evidence")
+
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    ev_root = None if args.no_evidence else (
+        Path(args.evidence_dir) if args.evidence_dir else (HERE / "runs" / "evidence" / f"all_{stamp}")
+    )
+
+    def _with_ev(base_cmd: list[str], sub_name: str) -> list[str]:
+        cmd = list(base_cmd) + common_flags
+        if ev_root is not None:
+            cmd += ["--evidence-dir", str(ev_root / sub_name)]
+        return cmd
+
     steps: list[tuple[str, list[str]]] = []
 
     if args.basic_part is not None or args.basic_diff is not None:
@@ -52,11 +73,11 @@ def main() -> int:
             cmd_basic += ["--part", str(args.basic_part)]
         if args.basic_diff is not None:
             cmd_basic += ["--diff", str(args.basic_diff)]
-        steps.append(("基础题（指定关卡）", cmd_basic))
+        steps.append(("基础题（指定关卡）", _with_ev(cmd_basic, "basic")))
     else:
         steps.append((
             "基础题 · 全部 9 关（Part 1/2/3 × 9/16/25）",
-            [py, "run_basic.py", "--auto-close"],
+            _with_ev([py, "run_basic.py", "--auto-close"], "basic"),
         ))
 
     cmd_ov = [py, "run_bonus_overlap.py", "--auto-close"]
@@ -68,8 +89,8 @@ def main() -> int:
         cmd_ov += ["--diff", str(args.bonus_diff)]
         cmd_ct += ["--diff", str(args.bonus_diff)]
 
-    steps.append(("附加题 A · 初始重叠开局（全部 9 关）" if args.bonus_diff is None else "附加题 A · 初始重叠开局", cmd_ov))
-    steps.append(("附加题 B · 初始居中开局（全部 9 关）" if args.bonus_diff is None else "附加题 B · 初始居中开局", cmd_ct))
+    steps.append(("附加题 A · 初始重叠开局（全部 9 关）" if args.bonus_diff is None else "附加题 A · 初始重叠开局", _with_ev(cmd_ov, "overlap")))
+    steps.append(("附加题 B · 初始居中开局（全部 9 关）" if args.bonus_diff is None else "附加题 B · 初始居中开局", _with_ev(cmd_ct, "center")))
 
     results = []
     for title, cmd in steps:
