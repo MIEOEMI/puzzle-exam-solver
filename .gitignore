@@ -18,4 +18,5 @@ dataset/cls/
 dataset/det/images/
 *.cache
 .vscode/
-tools/
+tools/*
+!tools/doctor.py

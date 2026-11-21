@@ -1,27 +1,5 @@
-#!/usr/bin/env python3
-"""puzzle.moyunliuyin.me 考核自动解题（Part 3 混合 · 5×5）。
-
-用法
-----
-    python run_exam.py                      # 无头跑一次
-    python run_exam.py --headful            # 弹窗口（录演示视频用）
-    python run_exam.py --part 3 --diff 25   # 指定部分与难度
-    python run_exam.py --slow 0.15          # 每步放慢，便于肉眼观察/录制
-
-流程
-----
-1. 开考核局（Part/难度通过 radio 选择）
-2. 从 canvas 取像素：参考图 + 拼图画布
-3. 复现布局几何 -> 30 个槽位坐标
-4. 参考图切 5x5：5 个纯白格 + 20 个照片格
-5. 块分类：中心区纯白 -> 白块；否则照片块
-6. 照片块 vs 照片格做匈牙利全局指派 -> 20 个映射，落选 5 块 = 诱饵
-7. 按锚点规则（外圈 -> 逐层向内）依次拖拽落子
-8. 剩下 5 个白块用「排除法 + 吸附反馈」补完
-"""
 from __future__ import annotations
 
-import argparse
 import base64
 import json
 import re
@@ -33,9 +11,8 @@ import cv2
 import numpy as np
 from playwright.sync_api import sync_playwright
 
-# Windows 控制台默认 cp936(GBK)：打印 ✅ / ❌ / 🎉 会抛 UnicodeEncodeError，
-# 进程直接死在进度行上，看起来就是"跑不起来"。见 solver/console.py。
-from console import force_utf8
+
+from console import force_utf8   #这个是修控制台，我也不太懂
 
 force_utf8()
 
@@ -45,26 +22,21 @@ from white_shape import board_color, cell_required_edges, white_piece_edges, whi
 
 URL = "https://puzzle.moyunliuyin.me/?mode=exam"
 
+# 默认考核配置：依次跑完 Part 1/2/3 × 9/16/25 共 9 关
+PARTS = (1, 2, 3)         # 1=照片, 2=纯白, 3=混合
+DIFFS = (9, 16, 25)       # 3×3 / 4×4 / 5×5
+PAUSE = 5.0               # 每局通关后的中间停顿秒数（含通关弹窗展示与局间停顿）
+START_TIMEOUT = 90.0      # 站点要下完 25+5 张图才切到 0/25，慢网络实测 10~40s
+
 # 站点素材在仓库里有一份完全一样的副本（tools/download_catalog.py 下的），
 # 用它喂给浏览器，开局就不用等 50 多张图从网上下来。
 CATALOG_DIR = Path(__file__).resolve().parent.parent / "dataset" / "raw"
 
 
+
+#--------------------------------------------------------------- 素材缓存
+
 def install_catalog_cache(context, quiet=False):
-    """把 /assets/catalog/** 的请求改由本地 dataset/raw 供给。
-
-    为什么必须这么做（2026-11-16 版站点起）：
-      站点新增了 StateGuard，每 1.2s 调一次 board.verifyState() 对账。
-      而 ExamMode.startPart() 是**先** board.setDimensions(5,5)，**再**
-      await loadTheme() 去下 25 张照片 + 5 张诱饵 + 25 张参考图，
-      下完才 buildPieces()。这段窗口里棋盘还是上一局的 9 块，
-      对账看到 "cells 9 != grid 25" -> 判为外部篡改 -> board.locked = true，
-      之后 beginDrag / registerMove / checkSnap 全部直接 return，
-      表现就是**浏览器开了、鼠标也在动，但一块都吸不上**。
-
-      本地供给后这个窗口从 40~70s 缩到 1s 内，站点自己的对账正常通过。
-      这不是绕过校验：请求还是那份素材，只是从磁盘读。
-    """
     served = {"n": 0, "miss": 0}
     mem_cache: dict[Path, bytes] = {}
 
@@ -89,6 +61,10 @@ def install_catalog_cache(context, quiet=False):
         have = CATALOG_DIR.exists()
         print(f"[素材] {'本地供给' if have else '本地缺失，回退联网'} {CATALOG_DIR}")
     return served
+
+
+
+
 
 
 # ---------------------------------------------------------------- 页面操作
@@ -140,6 +116,15 @@ JS_SWITCH = """() => { const b = document.getElementById('btn-exam-switch');
 JS_TAMPER = """() => { const d = document.documentElement.dataset.tamper;
   const el = document.getElementById('integrity-alert');
   return JSON.stringify({tamper: d || null, banner: el ? el.innerText.slice(0, 120) : null}); }"""
+
+
+#---------------------------------------上方内容是JavaScript
+
+
+
+
+
+
 
 
 def parse_progress(txt: str):
@@ -231,8 +216,6 @@ JS_SUB = ("() => { const e = document.getElementById('exam-part-sub');"
 JS_PANEL = ("() => { const e = document.getElementById('exam-start');"
             " return e ? !e.hidden : false; }")
 
-START_TIMEOUT = 90.0      # 站点要下完 25+5 张图才切到 0/25，慢网络实测 10~40s
-
 # 考核真正「开局成功」的判据（只看进度数字不够）：
 #   考核页一打开，默认就是 Part 1 · 9 格，#progress-display 已经显示 "0 / 9"，
 #   但此时「开始这一部分」弹窗还盖在画布上，考核根本没开始。旧代码看到 tot==9
@@ -261,7 +244,7 @@ JS_EXAM_STATUS = """() => {
 def exam_status(page):
     try:
         return json.loads(page.evaluate(JS_EXAM_STATUS))
-    except Exception:                                  # 页面正在导航/重绘
+    except Exception:
         return {}
 
 
@@ -293,20 +276,8 @@ def wait_start_ready(page, timeout=25.0):
 
 
 def start_exam(page, part, diff, url=URL, timeout=START_TIMEOUT, verbose=True):
-    """开局：点一次「开始这一部分」，然后**耐心**等到进度变成 0/diff。
-
-    为什么旧版会"一直卡在选择难度界面"：
-      站点 startPart() 里先 setState('准备中…') + 禁用按钮，再 await loadTheme()，
-      而 loadTheme 要等 25 张照片 + 5 张诱饵 + 25 张参考图全部 onload 才 resolve
-      （实测这一步 10~40s，慢网络更久）。旧代码只等 10s 就认为"开局未生效"，
-      接着又去点按钮 —— 但那时 busy=true、按钮 disabled，点击被静默吞掉，
-      于是重试 4 次全落空，最后抛「开局失败」，屏幕就停在准备中/选择界面。
-
-    现在：只点一次，然后轮询 progress；真的超时才整页重载重来（最多 3 次）。
-    """
     for attempt in range(1, 4):
-        # 已经是目标部分/难度在跑（例如上一轮其实成功了），直接用。
-        # 注意：必须用 exam_running() 判断，不能只看 "0 / 9"（见 JS_EXAM_STATUS 注释）
+
         s = exam_status(page)
         if exam_running(s, part, diff):
             cur, tot = parse_progress(s["progress"])
@@ -314,8 +285,7 @@ def start_exam(page, part, diff, url=URL, timeout=START_TIMEOUT, verbose=True):
                 print(f"[开局] 已在运行 {cur}/{tot}")
             return cur, tot
 
-        # 弹窗没打开才需要点「切换」回到选择界面
-        # （进行中点切换会弹 confirm，Playwright 默认自动取消，所以这里只在必要时点）
+
         if not s.get("panel_open"):
             try:
                 page.evaluate(JS_SWITCH)
@@ -365,25 +335,23 @@ def start_exam(page, part, diff, url=URL, timeout=START_TIMEOUT, verbose=True):
                        f"（part={part}）。多半是站点素材下载卡住，网络通了再跑。")
 
 
-def solve_one_level(page, part, diff, classifier, cell_classifier, args, shots=None):
-    """在已打开的浏览器页面上完成指定 (part, diff) 的一局，返回 (cur, tot, elapsed)。"""
+def solve_one_level(page, part, diff, classifier, cell_classifier):
+
     t_level = time.time()
-    rows = cols = int(round(diff ** 0.5))
-    n_decoys = round(diff * 0.2)
+
+    rows = cols = int(round(diff ** 0.5))#计算宽高
+    n_decoys = round(diff * 0.2)  #诱饵数
     part_names = {1: "照片", 2: "纯白", 3: "混合"}
     print("\n" + "=" * 64)
     print(f"▶ 开始关卡：Part {part}（{part_names.get(part, '')}）· {rows}×{cols}（{diff} 格 + {n_decoys} 诱饵）")
     print("=" * 64)
 
-    # 每局开始前清空 YOLO 的键缓存（因为键是 (row, col) 和 ('piece', i)，跨局不能复用）
+    #清理class定义里的缓存，避免出现跨局使用数据倒置出错
     for clf in (classifier, cell_classifier):
         if clf is not None and hasattr(clf, "_cache"):
             clf._cache.clear()
 
-    if shots:
-        shots.mkdir(parents=True, exist_ok=True)
-
-    # 站点偶尔很慢，goto 也可能超时，重试几次
+    # 网站偶尔打不开，重试几次
     for gi in range(3):
         try:
             page.goto(URL, wait_until="load", timeout=45000)
@@ -392,7 +360,11 @@ def solve_one_level(page, part, diff, classifier, cell_classifier, args, shots=N
             print(f"[goto 重试 {gi+1}] {type(e).__name__}")
             page.wait_for_timeout(1500)
 
-    cur, tot = start_exam(page, part, diff, timeout=args.start_timeout)
+
+
+
+
+    cur, tot = start_exam(page, part, diff, timeout=START_TIMEOUT)
     r = "start_exam"
 
     for _retry in range(1, 6):
@@ -401,7 +373,7 @@ def solve_one_level(page, part, diff, classifier, cell_classifier, args, shots=N
             break
         print(f"[开局] 站点对账把这次开局判成篡改（{_t['tamper']}），刷新重开 {_retry}/5")
         page.goto(URL, wait_until="load", timeout=60000)
-        cur, tot = start_exam(page, part, diff, timeout=args.start_timeout)
+        cur, tot = start_exam(page, part, diff, timeout=START_TIMEOUT)
     else:
         raise RuntimeError("连续 5 次开局都撞上站点自己的对账窗口，稍后重试")
 
@@ -426,11 +398,9 @@ def solve_one_level(page, part, diff, classifier, cell_classifier, args, shots=N
               f"CSS {rect['w']:.0f}x{rect['h']:.0f}，坐标换算 sx={rect['sx']:.3f} sy={rect['sy']:.3f}")
     refinfo = json.loads(page.evaluate(JS_REF))
     ref = to_bgr(refinfo["src"])
-    if shots:
-        cv2.imwrite(str(shots / "01_start_canvas.png"), canvas)
     print(f"画布 {canvas.shape[1]}x{canvas.shape[0]}  参考图 {ref.shape[1]}x{ref.shape[0]}")
 
-    # ---- 视觉分析（YOLO 已在开局前加载好）
+
     A = Analysis(canvas, ref, rows, cols, n_decoys)
     res = A.match_photo_pieces(classifier=classifier,
                                cell_classifier=cell_classifier)
@@ -440,9 +410,16 @@ def solve_one_level(page, part, diff, classifier, cell_classifier, args, shots=N
     print(f"白块 {len(res['white_slots'])} 个: {res['white_slots']}")
     print(f"照片映射 {len(res['assign'])} 个，诱饵 {len(res['decoys'])} 个: {res['decoys']}")
 
+
+    
+
     L = A.L
     pw, ph = L["piece"]["w"], L["piece"]["h"]
     slots = L["slots"]
+
+
+
+
 
     # ---- 按锚点顺序落照片块
     order = anchor_order(res["assign"])
@@ -454,7 +431,7 @@ def solve_one_level(page, part, diff, classifier, cell_classifier, args, shots=N
         a = res["assign"][i]
         cell = (a["row"], a["col"])
         before = placed
-        drop_piece(page, rect, L, slots[i], cell, jitter=a["jitter"], slow=args.slow)
+        drop_piece(page, rect, L, slots[i], cell, jitter=a["jitter"])
         after = parse_progress(page.evaluate(JS_PROGRESS))[0]
 
         tries = 0
@@ -489,8 +466,7 @@ def solve_one_level(page, part, diff, classifier, cell_classifier, args, shots=N
             for si in ranked:
                 sc_s, dx_s, dy_s = template_score(res["pads"][si][0], cell_img[mcell], pw, ph)
                 before = placed
-                drop_piece(page, rect, L, slots[si], mcell,
-                           jitter=(0, 0), slow=args.slow)
+                drop_piece(page, rect, L, slots[si], mcell, jitter=(0, 0))
                 after = parse_progress(page.evaluate(JS_PROGRESS))[0]
                 if after > before:
                     placed = after
@@ -504,9 +480,6 @@ def solve_one_level(page, part, diff, classifier, cell_classifier, args, shots=N
                     px_b, py_b = css_xy(rect, slots[si]["x"] + pw / 2, slots[si]["y"] + ph / 2)
                     drag(page, tx, ty, px_b, py_b, delay=0)
                     time.sleep(0.02)
-
-    if shots:
-        cv2.imwrite(str(shots / "02_after_photo.png"), to_bgr(page.evaluate(JS_CANVAS_PNG)))
 
     # ---- 白块求解：齿型约束（直边 + 邻接凹凸互补）+ 锚点顺序 + 缓存位置
     cur, tot = placed, diff
@@ -604,8 +577,8 @@ def solve_one_level(page, part, diff, classifier, cell_classifier, args, shots=N
             tx, ty = css_xy(rect, L["board"]["x"] + cell[1] * pw + pw / 2,
                             L["board"]["y"] + cell[0] * ph + ph / 2)
             before = cur
-            drag(page, sx, sy, tx, ty, delay=args.slow)
-            time.sleep(0.02 if not args.slow else args.slow + 0.05)
+            drag(page, sx, sy, tx, ty)
+            time.sleep(0.02)
             cur, tot = parse_progress(page.evaluate(JS_PROGRESS))
             if cur > before:
                 print(f"  白块#{i} -> {cell} ✅ 进度 {cur}/{tot}")
@@ -647,9 +620,6 @@ def solve_one_level(page, part, diff, classifier, cell_classifier, args, shots=N
                 refresh = False
 
     cur, tot = parse_progress(page.evaluate(JS_PROGRESS))
-    if shots:
-        cv2.imwrite(str(shots / "03_final.png"), to_bgr(page.evaluate(JS_CANVAS_PNG)))
-        page.screenshot(path=str(shots / "04_page.png"))
 
     elapsed = round(time.time() - t_level, 1)
     _t = json.loads(page.evaluate(JS_TAMPER))
@@ -675,14 +645,13 @@ def export_round_evidence_and_pause(
     cur: int,
     tot: int,
     evidence_dir: Path | None,
-    pause: float = 5.0,
-    pause_enter: bool = False,
+    pause: float = PAUSE,
     has_next: bool = False,
 ) -> Path | None:
     """单局结束后：
     1) 等通关弹窗呈现并作短暂停顿展示已完成棋盘/用时；
     2) 通过站点「导出本场证据（JSON）」按钮触发真实下载，保存本局官网 JSON 完成证明；
-    3) 在切回开始面板显示已通关列表后再作局间停顿（可选回车手动继续）。
+    3) 在切回开始面板显示已通关列表后再作局间停顿。
     """
     won = tot > 0 and cur >= tot
     victory_wait = min(pause, max(0.8, round(pause * 0.65, 2))) if pause > 0 else 0.0
@@ -740,131 +709,87 @@ def export_round_evidence_and_pause(
         print(f"[停顿] 局间停顿 {rest_wait:.1f}s，准备进入下一关…")
         page.wait_for_timeout(int(rest_wait * 1000))
 
-    if pause_enter and has_next and sys.stdin and sys.stdin.isatty():
-        try:
-            input("按回车继续下一关…")
-        except (EOFError, KeyboardInterrupt):
-            pass
-
     return saved_path
 
 
 # ---------------------------------------------------------------- 主流程
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--part", type=int, default=None,
-                    help="指定部分 (1=照片, 2=纯白, 3=混合)；不传则默认依次跑完 Part 1/2/3")
-    ap.add_argument("--diff", type=int, default=None,
-                    help="指定难度 (9/16/25)；不传则默认依次跑完 9 -> 16 -> 25")
-    ap.add_argument("--headful", action=argparse.BooleanOptionalAction, default=True,
-                    help="弹窗口（默认开）；--no-headful 无头跑")
-    ap.add_argument("--start-timeout", type=float, default=START_TIMEOUT,
-                    help=f"等「准备中…」变成 0/diff 的最长秒数（默认 {START_TIMEOUT:.0f}）")
-    ap.add_argument("--slow", type=float, default=0.0, help="每步放慢秒数")
-    ap.add_argument("--shots", default=None, help="截图输出目录")
-    ap.add_argument("--max-seconds", type=float, default=300)
-    ap.add_argument("--video", default=None, help="录屏目录（WebM），用于演示视频")
-    ap.add_argument("--no-yolo", action="store_true", help="不加载 YOLO，只用 OpenCV")
-    ap.add_argument("--pause", type=float, default=5.0,
-                    help="每局通关后的中间停顿秒数（默认 5.0s，含通关弹窗展示与局间停顿）")
-    ap.add_argument("--pause-enter", action="store_true",
-                    help="每局结束后等待终端按回车再进入下一关")
-    ap.add_argument("--evidence-dir", default=None,
-                    help="每局网站 JSON 完成证明导出目录（默认 runs/evidence/basic_<时间>/）")
-    ap.add_argument("--no-evidence", action="store_true",
-                    help="关闭自动导出每局网站 JSON 完成证明")
-    ap.add_argument("--auto-close", action="store_true",
-                    help="通关后展示 1.5s 自动关闭窗口（用于连续演示）")
-    ap.add_argument("--maximize", action=argparse.BooleanOptionalAction, default=True,
-                    help="有头模式最大化窗口（默认开）；--no-maximize 用 --vw/--vh")
-    ap.add_argument("--dpr", type=float, default=None,
-                    help="设备像素比；最大化时自动取屏幕真实值，无头/带 --vw 时默认 1.0")
-    ap.add_argument("--vw", type=int, default=1280, help="窗口宽（无头 / --no-maximize）")
-    ap.add_argument("--vh", type=int, default=800, help="窗口高（无头 / --no-maximize）")
-    args = ap.parse_args()
-
-    parts = [args.part] if args.part is not None else [1, 2, 3]
-    if args.diff == 4:
-        print("[提示] 新版考核站已移除 4 格 (2×2) 选项（站点源码 Math.max(3, size) 最小为 3×3=9 格），自动切换为 9 格。")
-        args.diff = 9
-    diffs = [args.diff] if args.diff is not None else [9, 16, 25]
-    schedule = [(pt, df) for pt in parts for df in diffs]
-    shots_root = Path(args.shots) if args.shots else None
-    evidence_dir = None if args.no_evidence else (
-        Path(args.evidence_dir) if args.evidence_dir else default_evidence_dir("basic")
-    )
+def main(auto_close: bool = False, evidence_dir: Path | None = None) -> int:
+    schedule = [(pt, df) for pt in PARTS for df in DIFFS]
+    ev_dir = Path(evidence_dir) if evidence_dir is not None else default_evidence_dir("basic")
 
     t_start = time.time()
+
+
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(channel="chrome", headless=not args.headful,
+        browser = p.chromium.launch(channel="chrome", headless=False,
                                     args=["--no-sandbox", "--disable-dev-shm-usage"])
 
-        if args.maximize and args.headful:
-            aw, ah, real_dpr = screen_metrics(browser)
-            vw_css, vh_css = aw, max(600, ah - 8)
-            scale = args.dpr or real_dpr
-            print(f"[窗口] 屏幕 {aw}x{ah} · DPR {scale:g} -> 视口 {vw_css}x{vh_css}")
-        else:
-            vw_css, vh_css = args.vw, args.vh
-            scale = args.dpr or 1.0
-        viewport = {"width": vw_css, "height": vh_css}
+        aw, ah, scale = screen_metrics(browser)
+        vw_css, vh_css = aw, max(600, ah - 8)
+        print(f"[窗口] 屏幕 {aw}x{ah} · DPR {scale:g} -> 视口 {vw_css}x{vh_css}")
 
-        ctx_kwargs = {
-            "viewport": viewport,
-            "device_scale_factor": scale,
-            "accept_downloads": True,
-        }
-        if args.video:
-            vdir = Path(args.video)
-            vdir.mkdir(parents=True, exist_ok=True)
-            ctx_kwargs["record_video_dir"] = str(vdir)
-            ctx_kwargs["record_video_size"] = {"width": args.vw, "height": args.vh}
-        ctx = browser.new_context(**ctx_kwargs)
+        ctx = browser.new_context(
+            viewport={"width": vw_css, "height": vh_css},
+            device_scale_factor=scale,
+            accept_downloads=True,
+        )
         page = ctx.new_page()
-
-        if args.maximize and args.headful:
-            maximize_window(page)
+        maximize_window(page)
 
         page.on("dialog", lambda d: d.accept())
         install_catalog_cache(page.context)
 
-        # ---- YOLO 在全部关卡开始前只加载并预热一次
-        classifier = None          # 拼图块用
-        cell_classifier = None     # 参考格用
-        if not args.no_yolo:
-            try:
-                from yolo_check import Classifier
-                from yolo_check import DET_WEIGHTS, CLS_WEIGHTS
-                if DET_WEIGHTS.exists():
-                    cell_classifier = Classifier(weights=DET_WEIGHTS)
-                    print(f"YOLO 检测模型（格子）: {cell_classifier.path.name}"
-                          f"（{len(cell_classifier.names)} 类）")
-                if CLS_WEIGHTS.exists():
-                    classifier = Classifier(weights=CLS_WEIGHTS)
-                    print(f"YOLO 分类模型（碎片）: {classifier.path.name}"
-                          f"（{len(classifier.names)} 类）")
-                if classifier is None:
-                    classifier = cell_classifier
-                if cell_classifier is None:
-                    cell_classifier = classifier
-                dummy = np.full((240, 320, 3), 128, np.uint8)
-                for clf in {id(c): c for c in (classifier, cell_classifier) if c}.values():
-                    clf.predict(dummy)
-            except Exception as e:
-                print(f"[warn] YOLO 未启用，退回纯 OpenCV：{e}")
-                classifier = cell_classifier = None
+
+
+
+        #这里我提前预热了一下模型
+        classifier = None
+        cell_classifier = None
+        try:
+
+
+            from yolo_check import Classifier, DET_WEIGHTS, CLS_WEIGHTS
+            if DET_WEIGHTS.exists():
+                cell_classifier = Classifier(weights=DET_WEIGHTS)
+                print(f"YOLO 检测模型（格子）: {cell_classifier.path.name}"
+                      f"（{len(cell_classifier.names)} 类）")
+            if CLS_WEIGHTS.exists():
+                classifier = Classifier(weights=CLS_WEIGHTS)
+                print(f"YOLO 分类模型（碎片）: {classifier.path.name}"
+                      f"（{len(classifier.names)} 类）")
+
+
+            if classifier is None:
+                classifier = cell_classifier
+            if cell_classifier is None:
+                cell_classifier = classifier
+            #保证一下都有模型被加载，只是防范
+
+
+            dummy = np.full((240, 320, 3), 128, np.uint8)
+            for clf in {id(c): c for c in (classifier, cell_classifier) if c}.values():
+                clf.predict(dummy)
+
+
+
+        except Exception as e:
+            print(f"[warn] YOLO 未启用，退回纯 OpenCV。错误原因：{e}")
+            classifier = cell_classifier = None
+
+
+
+
+
 
         summary = []
         exported_files = []
+
         part_names = {1: "Part 1 · 照片", 2: "Part 2 · 纯白", 3: "Part 3 · 混合"}
         for idx, (pt, df) in enumerate(schedule):
-            sub_shots = (
-                (shots_root / f"p{pt}_{df}" if len(schedule) > 1 else shots_root)
-                if shots_root else None
-            )
             cur, tot, dt = solve_one_level(
-                page, pt, df, classifier, cell_classifier, args, shots=sub_shots
+                page, pt, df, classifier, cell_classifier
             )
             summary.append((pt, df, cur, tot, dt))
             proof_path = export_round_evidence_and_pause(
@@ -872,41 +797,39 @@ def main():
                 prefix=f"{idx + 1:02d}_basic_p{pt}_{df}",
                 cur=cur,
                 tot=tot,
-                evidence_dir=evidence_dir,
-                pause=args.pause,
-                pause_enter=args.pause_enter,
+                evidence_dir=ev_dir,
+                pause=PAUSE,
                 has_next=(idx < len(schedule) - 1),
             )
             if proof_path is not None:
                 exported_files.append(proof_path)
 
-        if len(summary) > 1:
-            total_dt = round(time.time() - t_start, 1)
-            passed = sum(1 for _, _, c, t, _ in summary if c == t and t > 0)
-            print("\n" + "=" * 64)
-            print(f"全部关卡汇总：{passed}/{len(summary)} 关通关 | 总用时 {total_dt}s")
-            print("-" * 64)
-            for pt, df, c, t, dt in summary:
-                r_sz = int(round(df ** 0.5))
-                ok_s = "✅ 通关" if (c == t and t > 0) else "❌ 未完成"
-                print(f"  {part_names.get(pt, f'Part {pt}'):<14} | {r_sz}×{r_sz} ({df:>2}格) | "
-                      f"{c:>2}/{t:<2} | {dt:>5.1f}s | {ok_s}")
-            if evidence_dir is not None:
-                print("-" * 64)
-                print(f"网站 JSON 完成证明已导出 ({len(exported_files)}/{len(summary)} 份)：{evidence_dir}")
-            print("=" * 64)
 
-        if args.headful:
-            if args.auto_close:
-                page.wait_for_timeout(1500)
-            elif sys.stdin and sys.stdin.isatty():
-                try:
-                    input("按回车关闭…")
-                except (EOFError, KeyboardInterrupt):
-                    pass
-        if ctx is not None:
-            page.close()          # 关页面才会落盘视频
-            ctx.close()
+
+
+        total_dt = round(time.time() - t_start, 1)
+        passed = sum(1 for _, _, c, t, _ in summary if c == t and t > 0)
+        print("\n" + "=" * 64)
+        print(f"全部关卡汇总：{passed}/{len(summary)} 关通关 | 总用时 {total_dt}s")
+        print("-" * 64)
+        for pt, df, c, t, dt in summary:
+            r_sz = int(round(df ** 0.5))
+            ok_s = "✅ 通关" if (c == t and t > 0) else "❌ 未完成"
+            print(f"  {part_names.get(pt, f'Part {pt}'):<14} | {r_sz}×{r_sz} ({df:>2}格) | "
+                  f"{c:>2}/{t:<2} | {dt:>5.1f}s | {ok_s}")
+        print("-" * 64)
+        print(f"网站 JSON 完成证明已导出 ({len(exported_files)}/{len(summary)} 份)：{ev_dir}")
+        print("=" * 64)
+
+        if auto_close:
+            page.wait_for_timeout(1500)
+        elif sys.stdin and sys.stdin.isatty():
+            try:
+                input("按回车关闭…")
+            except (EOFError, KeyboardInterrupt):
+                pass
+        page.close()
+        ctx.close()
         browser.close()
         all_ok = all(c == t and t > 0 for _, _, c, t, _ in summary)
         return 0 if all_ok else 1

@@ -205,11 +205,11 @@ python3 -m venv venv
 ### 先自检，再跑
 
 ```powershell
-python doctor.py               # 逐项检查 Python/依赖/Chrome 能否启动/站点速度/导入链
-python doctor.py --start-test  # 只实测"开局"这一段，量出准备中要几秒
+python tools/doctor.py               # 逐项检查 Python/依赖/Chrome 能否启动/站点速度/导入链
+python tools/doctor.py --start-test  # 只实测"开局"这一段，量出准备中要几秒
 ```
 
-`doctor.py --start-test` 直接回答「为什么卡在选择难度界面」：
+`tools/doctor.py --start-test` 直接回答「为什么卡在选择难度界面」：
 它把同一段开局逻辑跑一遍，打印 `准备中 0s… / 10s… / 成功 0/25，用时 11.8s`。
 站点素材下载慢（实测单张 0.3–2.4s，开局要下 55 张）时这一步就是十几秒到几十秒。
 
@@ -344,7 +344,8 @@ python run_bonus_center.py  --no-headful --auto-close
 │   ├── place_exam.py         open_exam / export / place / state
 │   └── test_place_exam.py    端到端自测
 │
-├── tools/                    数据集与模型的可复现脚本
+├── tools/                    环境自检与数据集/模型可复现脚本
+│   ├── doctor.py             环境自检（依赖/Chrome/模型/站点/导入链）
 │   ├── download_catalog.py   下载站点 388 张素材
 │   ├── auto_label_det.py     自动生成检测标注（官方权重 + GrabCut）
 │   ├── build_det_images.py   从 raw 重建检测集图片（图片不入库）

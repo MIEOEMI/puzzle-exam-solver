@@ -3,13 +3,11 @@
 
 用法
 ----
-    python run_bonus_overlap.py                  # 默认依次跑完初始重叠全部 9 关（Part 1/2/3 × 9/16/25）
-    python run_bonus_center.py                   # 默认依次跑完初始居中全部 9 关（Part 1/2/3 × 9/16/25）
-    python run_bonus_overlap.py --part 3 --diff 9  # 单独跑某一关
+    python run_bonus_overlap.py    # 依次跑完初始重叠全部 9 关（Part 1/2/3 × 9/16/25）
+    python run_bonus_center.py     # 依次跑完初始居中全部 9 关（Part 1/2/3 × 9/16/25）
 """
 from __future__ import annotations
 
-import argparse
 import base64
 import json
 import math
@@ -31,6 +29,12 @@ from white_shape import board_color, cell_required_edges, white_piece_info
 force_utf8()
 
 URL = "https://puzzle.moyunliuyin.me/?mode=exam"
+
+# 默认考核配置：依次跑完 Part 1/2/3 × 9/16/25 共 9 关
+PARTS = (1, 2, 3)         # 1=照片, 2=纯白, 3=混合
+DIFFS = (9, 16, 25)       # 3×3 / 4×4 / 5×5
+PAUSE = 5.0               # 每局通关后的中间停顿秒数（含通关弹窗展示与局间停顿）
+START_TIMEOUT = 60.0      # 等「准备中…」变成 0/diff 的最长秒数
 
 JS_RECT = """() => { const r = document.getElementById('puzzle-canvas').getBoundingClientRect();
   return JSON.stringify({left:r.left, top:r.top, w:r.width, h:r.height}); }"""
@@ -291,7 +295,7 @@ def inspect_isolated_piece(canvas, ix0, iy0, ix1, iy1, pw, ph, tmpl_of,
             "pname": pname, "all_scores": all_scores}
 
 
-def solve_one_bonus_level(page, part_id, diff, mode, piece_clf, cell_clf, args, shots=None):
+def solve_one_bonus_level(page, part_id, diff, mode, piece_clf, cell_clf):
     """在已打开的浏览器页面上完成一局附加题 (part_id, diff, mode)，返回 (cur, tot, elapsed)。"""
     from run_exam import JS_TAMPER, JS_SWITCH, wait_start_ready, exam_status, exam_running
 
@@ -308,9 +312,6 @@ def solve_one_bonus_level(page, part_id, diff, mode, piece_clf, cell_clf, args, 
     for clf in (piece_clf, cell_clf):
         if clf is not None and hasattr(clf, "_cache"):
             clf._cache.clear()
-
-    if shots:
-        shots.mkdir(parents=True, exist_ok=True)
 
     def _safe_goto(pg, target_url):
         for nav_i in range(1, 5):
@@ -336,7 +337,7 @@ def solve_one_bonus_level(page, part_id, diff, mode, piece_clf, cell_clf, args, 
         print(f"[开局 {_retry}] 点击开始 (part={part_id}, diff={diff}, mode={mode}) -> {r_start}")
 
         t1 = time.time()
-        while time.time() - t1 < args.start_timeout:
+        while time.time() - t1 < START_TIMEOUT:
             page.wait_for_timeout(100)
             s = exam_status(page)
             if exam_running(s, part_id, diff):
@@ -416,7 +417,6 @@ def solve_one_bonus_level(page, part_id, diff, mode, piece_clf, cell_clf, args, 
             need_canvas_h = int(math.ceil(need_h * 2 + bh + 16))
             print(f"[检验台不足] 画布 {CW}x{CH} 棋盘高 {bh:.0f} -> 上方净空 {bench_h}px，"
                   f"而块高 {ph:.0f}px（含双凸齿）需要 >= {need_h:.0f}px（画布高需 >= {need_canvas_h}px）")
-            print(f"             建议：去掉 --dpr 限制以启用自动 DPR 适配，或手动传 --dpr 2。")
     else:
         inspect_pt = (bx + bw + (CW - (bx + bw)) * 0.53, CH * 0.50)
         ix0 = max(int(bx + bw + 24), int(inspect_pt[0] - pw * 1.20))
@@ -431,7 +431,6 @@ def solve_one_bonus_level(page, part_id, diff, mode, piece_clf, cell_clf, args, 
         if bench_w < need_w or bench_h < need_h:
             print(f"[检验台不足] 画布 {CW}x{CH} -> 右侧净空 {bench_w}x{bench_h}px，"
                   f"而块尺寸 {pw:.0f}x{ph:.0f}px（含双凸齿）需要 >= {need_w:.0f}x{need_h:.0f}px")
-            print(f"             建议：去掉 --dpr 限制以启用自动 DPR 适配，或手动传 --dpr 2。")
 
     # 废件丢弃点：棋盘正下方最左端
     trash_pt = (bx + pw * 0.30, CH - ph * 0.52)
@@ -527,12 +526,12 @@ def solve_one_bonus_level(page, part_id, diff, mode, piece_clf, cell_clf, args, 
         tx, ty = cell_centre(cell)
         before = cur
         if abs(pos[0] - tx) < 6 and abs(pos[1] - ty) < 6:
-            drag(page, *css_xy(rect, tx, ty), *css_xy(rect, tx + 18, ty), delay=args.slow)
+            drag(page, *css_xy(rect, tx, ty), *css_xy(rect, tx + 18, ty))
             time.sleep(0.02)
-            drag(page, *css_xy(rect, tx + 18, ty), *css_xy(rect, tx, ty), delay=args.slow)
+            drag(page, *css_xy(rect, tx + 18, ty), *css_xy(rect, tx, ty))
         else:
-            drag(page, *css_xy(rect, pos[0], pos[1]), *css_xy(rect, tx, ty), delay=args.slow)
-        time.sleep(0.02 if not args.slow else args.slow + 0.05)
+            drag(page, *css_xy(rect, pos[0], pos[1]), *css_xy(rect, tx, ty))
+        time.sleep(0.02)
         cur, tot = parse_progress(page.evaluate(JS_PROGRESS))
         if cur > before:
             placed.add(cell)
@@ -554,11 +553,8 @@ def solve_one_bonus_level(page, part_id, diff, mode, piece_clf, cell_clf, args, 
                         # 该内圈格已满足锚点却吸不上，说明暂存在此的是高仿诱饵或错配块：立刻移走并腾出该格
                         parked_photo.pop(cell, None)
                         tx, ty = cell_centre(cell)
-                        drag(page, *css_xy(rect, tx, ty), *css_xy(rect, trash_pt[0], trash_pt[1]), delay=args.slow)
+                        drag(page, *css_xy(rect, tx, ty), *css_xy(rect, trash_pt[0], trash_pt[1]))
                         time.sleep(0.015)
-
-    if shots:
-        cv2.imwrite(str(shots / f"01_start_{mode}.png"), canvas)
 
     # ---------- 阶段 A：逐块抓到黑底检验台 -> 识别 -> 即刻分流 ----------
     max_pulls = (rows * cols + n_decoys) + 14
@@ -578,7 +574,7 @@ def solve_one_bonus_level(page, part_id, diff, mode, piece_clf, cell_clf, args, 
 
         gx, gy = cands[0]
         sub_before = canvas[iy0:iy1, ix0:ix1].astype(np.int16)
-        drag(page, *css_xy(rect, gx, gy), *css_xy(rect, inspect_pt[0], inspect_pt[1]), delay=args.slow)
+        drag(page, *css_xy(rect, gx, gy), *css_xy(rect, inspect_pt[0], inspect_pt[1]))
         time.sleep(0.02)
         canvas = to_bgr(page.evaluate(JS_PNG))
         sub_after = canvas[iy0:iy1, ix0:ix1].astype(np.int16)
@@ -594,7 +590,7 @@ def solve_one_bonus_level(page, part_id, diff, mode, piece_clf, cell_clf, args, 
                     or int(xs_c.min()) < 14 or ix0 + int(xs_c.max()) > ix1 - 14):
                 cx_q = ix0 + 0.5 * (float(xs_c.min()) + float(xs_c.max()))
                 cy_q = iy0 + 0.5 * (float(ys_c.min()) + float(ys_c.max()))
-                drag(page, *css_xy(rect, cx_q, cy_q), *css_xy(rect, inspect_pt[0], inspect_pt[1]), delay=args.slow)
+                drag(page, *css_xy(rect, cx_q, cy_q), *css_xy(rect, inspect_pt[0], inspect_pt[1]))
                 time.sleep(0.02)
                 canvas = to_bgr(page.evaluate(JS_PNG))
 
@@ -616,7 +612,7 @@ def solve_one_bonus_level(page, part_id, diff, mode, piece_clf, cell_clf, args, 
             is_dec_w = bool(info.get("is_decoy"))
             if not white_cells or (mode == "overlap" and is_dec_w):
                 print(f"  [白块诱饵] {edges} -> 丢弃废件区")
-                drag(page, *css_xy(rect, cx, cy), *css_xy(rect, trash_pt[0], trash_pt[1]), delay=args.slow)
+                drag(page, *css_xy(rect, cx, cy), *css_xy(rect, trash_pt[0], trash_pt[1]))
                 time.sleep(0.015)
                 continue
 
@@ -645,7 +641,7 @@ def solve_one_bonus_level(page, part_id, diff, mode, piece_clf, cell_clf, args, 
                     continue
                 wp_pt = overlap_park_slots[ov_park_idx % len(overlap_park_slots)]
                 ov_park_idx += 1
-                drag(page, *css_xy(rect, cur_pos[0], cur_pos[1]), *css_xy(rect, wp_pt[0], wp_pt[1]), delay=args.slow)
+                drag(page, *css_xy(rect, cur_pos[0], cur_pos[1]), *css_xy(rect, wp_pt[0], wp_pt[1]))
                 parked_white.append({"pos": wp_pt, "edges": edges, "is_decoy": is_dec_w})
                 failed_grabs.append((wp_pt[0], wp_pt[1], max(pw, ph) * 0.55))
                 print(f"  [白块] 齿型 {edges} -> 暂存 ({wp_pt[0]:.0f},{wp_pt[1]:.0f})")
@@ -653,7 +649,7 @@ def solve_one_bonus_level(page, part_id, diff, mode, piece_clf, cell_clf, args, 
                 all_park = side_slots + overlap_park_slots
                 slot_pt = all_park[min(side_slot_idx, len(all_park) - 1)]
                 side_slot_idx += 1
-                drag(page, *css_xy(rect, cx, cy), *css_xy(rect, slot_pt[0], slot_pt[1]), delay=args.slow)
+                drag(page, *css_xy(rect, cx, cy), *css_xy(rect, slot_pt[0], slot_pt[1]))
                 parked_white.append({"pos": slot_pt, "edges": edges, "is_decoy": is_dec_w})
                 failed_grabs.append((slot_pt[0], slot_pt[1], max(pw, ph) * 0.55))
                 tag_d = " [疑似诱饵置后]" if is_dec_w else ""
@@ -663,7 +659,7 @@ def solve_one_bonus_level(page, part_id, diff, mode, piece_clf, cell_clf, args, 
 
         if kind == "decoy":
             print(f"  [照片诱饵] raw={info.get('raw_ncc', 0):.2f} -> 丢弃废件区")
-            drag(page, *css_xy(rect, cx, cy), *css_xy(rect, trash_pt[0], trash_pt[1]), delay=args.slow)
+            drag(page, *css_xy(rect, cx, cy), *css_xy(rect, trash_pt[0], trash_pt[1]))
             time.sleep(0.015)
             continue
 
@@ -693,25 +689,25 @@ def solve_one_bonus_level(page, part_id, diff, mode, piece_clf, cell_clf, args, 
                                 cur_pos = cell_centre(c2)
                         else:
                             tx2, ty2 = cell_centre(c2)
-                            drag(page, *css_xy(rect, cur_pos[0], cur_pos[1]), *css_xy(rect, tx2, ty2), delay=args.slow)
+                            drag(page, *css_xy(rect, cur_pos[0], cur_pos[1]), *css_xy(rect, tx2, ty2))
                             parked_photo[c2] = (tx2, ty2)
                             handled = True
                             break
                     if not handled:
-                        drag(page, *css_xy(rect, cur_pos[0], cur_pos[1]), *css_xy(rect, trash_pt[0], trash_pt[1]), delay=args.slow)
+                        drag(page, *css_xy(rect, cur_pos[0], cur_pos[1]), *css_xy(rect, trash_pt[0], trash_pt[1]))
             elif info["raw_ncc"] >= 0.65:
                 tx, ty = cell_centre(cell)
-                drag(page, *css_xy(rect, cx, cy), *css_xy(rect, tx, ty), delay=args.slow)
+                drag(page, *css_xy(rect, cx, cy), *css_xy(rect, tx, ty))
                 parked_photo[cell] = (tx, ty)
                 print(f"    暂存内圈格 {cell} 等待邻居锚点")
             else:
                 print(f"  [照片诱饵] raw={info['raw_ncc']:.2f} -> 丢弃废件区")
-                drag(page, *css_xy(rect, cx, cy), *css_xy(rect, trash_pt[0], trash_pt[1]), delay=args.slow)
+                drag(page, *css_xy(rect, cx, cy), *css_xy(rect, trash_pt[0], trash_pt[1]))
         else:
             all_park = side_slots + overlap_park_slots
             slot_pt = all_park[min(side_slot_idx, len(all_park) - 1)]
             side_slot_idx += 1
-            drag(page, *css_xy(rect, cx, cy), *css_xy(rect, slot_pt[0], slot_pt[1]), delay=args.slow)
+            drag(page, *css_xy(rect, cx, cy), *css_xy(rect, slot_pt[0], slot_pt[1]))
             staged_photo_list.append({"pos": slot_pt, "scores": info["all_scores"]})
             failed_grabs.append((slot_pt[0], slot_pt[1], max(pw, ph) * 0.55))
         time.sleep(0.015)
@@ -847,9 +843,6 @@ def solve_one_bonus_level(page, part_id, diff, mode, piece_clf, cell_clf, args, 
                     time.sleep(0.015)
 
     cur, tot = parse_progress(page.evaluate(JS_PROGRESS))
-    if shots:
-        cv2.imwrite(str(shots / f"02_final_{mode}.png"), to_bgr(page.evaluate(JS_PNG)))
-        page.screenshot(path=str(shots / f"03_page_{mode}.png"))
 
     elapsed = round(time.time() - t_level, 1)
     print(f"\n=== {mode} Part {part_id} · {diff}格 结果 {cur}/{tot} | 用时 {elapsed}s "
@@ -857,180 +850,108 @@ def solve_one_bonus_level(page, part_id, diff, mode, piece_clf, cell_clf, args, 
     return cur, tot, elapsed
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=["overlap", "center"], default="overlap")
-    ap.add_argument("--part", type=int, default=None,
-                    help="指定部分 (1=照片, 2=纯白, 3=混合)；不传则默认跑全部 Part 1/2/3")
-    ap.add_argument("--theme", default=None, help="兼容旧参数 animals/white/mixed")
-    ap.add_argument("--diff", type=int, default=None,
-                    help="指定难度 (9/16/25)；不传则默认跑全部 9 -> 16 -> 25")
-    ap.add_argument("--headful", action=argparse.BooleanOptionalAction, default=True)
-    ap.add_argument("--maximize", action=argparse.BooleanOptionalAction, default=True)
-    ap.add_argument("--dpr", type=float, default=None)
-    ap.add_argument("--vw", type=int, default=1280)
-    ap.add_argument("--vh", type=int, default=800)
-    ap.add_argument("--start-timeout", type=float, default=60.0)
-    ap.add_argument("--slow", type=float, default=0.0)
-    ap.add_argument("--video", default=None)
-    ap.add_argument("--shots", default=None)
-    ap.add_argument("--ident-min", type=float, default=0.52)
-    ap.add_argument("--no-yolo", action="store_true")
-    ap.add_argument("--pause", type=float, default=5.0,
-                    help="每局通关后的中间停顿秒数（默认 5.0s，含通关弹窗展示与局间停顿）")
-    ap.add_argument("--pause-enter", action="store_true",
-                    help="每局结束后等待终端按回车再进入下一关")
-    ap.add_argument("--evidence-dir", default=None,
-                    help="每局网站 JSON 完成证明导出目录（默认 runs/evidence/<mode>_<时间>/）")
-    ap.add_argument("--no-evidence", action="store_true",
-                    help="关闭自动导出每局网站 JSON 完成证明")
-    ap.add_argument("--auto-close", action="store_true",
-                    help="通关后展示 1.5s 自动关闭窗口")
-    args = ap.parse_args()
-
+def main(mode: str = "overlap", auto_close: bool = False, evidence_dir: Path | None = None) -> int:
     from run_exam import (
         default_evidence_dir,
         export_round_evidence_and_pause,
         install_catalog_cache,
     )
 
-    theme_to_part = {"animals": 1, "white": 2, "mixed": 3}
-    if args.part is None and args.theme in theme_to_part:
-        args.part = theme_to_part[args.theme]
-    if args.diff == 4:
-        print("[提示] 新版考核站已移除 4 格 (2×2) 选项，自动切换为 9 格。")
-        args.diff = 9
-
-    parts = [args.part] if args.part is not None else [1, 2, 3]
-    diffs = [args.diff] if args.diff is not None else [9, 16, 25]
-    schedule = [(pt, df) for pt in parts for df in diffs]
-    shots_root = Path(args.shots) if args.shots else None
-    evidence_dir = None if args.no_evidence else (
-        Path(args.evidence_dir) if args.evidence_dir else default_evidence_dir(args.mode)
-    )
+    schedule = [(pt, df) for pt in PARTS for df in DIFFS]
+    ev_dir = Path(evidence_dir) if evidence_dir is not None else default_evidence_dir(mode)
 
     t_start = time.time()
     with sync_playwright() as p:
-        browser = p.chromium.launch(channel="chrome", headless=not args.headful,
+        browser = p.chromium.launch(channel="chrome", headless=False,
                                     args=["--no-sandbox", "--disable-dev-shm-usage"])
 
-        if args.maximize and args.headful:
-            aw, ah, real_dpr = screen_metrics(browser)
-            vw_css, vh_css = aw, max(600, ah - 8)
-            base_dpr = real_dpr
-        else:
-            vw_css, vh_css = args.vw, args.vh
-            base_dpr = 1.0
+        aw, ah, base_dpr = screen_metrics(browser)
+        vw_css, vh_css = aw, max(600, ah - 8)
 
         # 站点棋盘高度上限 550px 按 Canvas 位图像素计算（CSS 尺寸 × DPR）。
-        # 若未显式传 --dpr，当当前屏幕/视口下预估画布位图不足 1820×1180 时，
-        # 自动抬高上下文 DPR，保证 1280×800 / 1080p / 无头环境下检验台与暂存位同样充裕。
-        if args.dpr is not None:
-            scale = args.dpr
-        else:
-            est_cw = max(500.0, vw_css * 0.73)
-            est_ch = max(360.0, vh_css - 210.0)
-            need_scale = max(1820.0 / est_cw, 1180.0 / est_ch)
-            auto_scale = min(3.0, math.ceil(need_scale * 10.0) / 10.0)
-            scale = max(base_dpr, auto_scale)
+        # 当当前屏幕下预估画布位图不足 1820×1180 时，自动抬高上下文 DPR，
+        # 保证小屏或 1080p 下检验台与暂存位同样充裕。
+        est_cw = max(500.0, vw_css * 0.73)
+        est_ch = max(360.0, vh_css - 210.0)
+        need_scale = max(1820.0 / est_cw, 1180.0 / est_ch)
+        auto_scale = min(3.0, math.ceil(need_scale * 10.0) / 10.0)
+        scale = max(base_dpr, auto_scale)
 
-        if args.maximize and args.headful:
-            note = f"（自动适配自 {base_dpr:g}）" if (args.dpr is None and scale > base_dpr + 1e-6) else ""
-            print(f"[窗口] 屏幕 {aw}x{ah} · DPR {scale:g}{note} -> 视口 {vw_css}x{vh_css}")
-        else:
-            note = f"（自动适配）" if (args.dpr is None and scale > base_dpr + 1e-6) else ""
-            print(f"[窗口] 视口 {vw_css}x{vh_css} · DPR {scale:g}{note}")
-        viewport = {"width": vw_css, "height": vh_css}
+        note = f"（自动适配自 {base_dpr:g}）" if scale > base_dpr + 1e-6 else ""
+        print(f"[窗口] 屏幕 {aw}x{ah} · DPR {scale:g}{note} -> 视口 {vw_css}x{vh_css}")
 
-        ctx_kwargs = {
-            "viewport": viewport,
-            "device_scale_factor": scale,
-            "accept_downloads": True,
-        }
-        if args.video:
-            Path(args.video).mkdir(parents=True, exist_ok=True)
-            ctx_kwargs["record_video_dir"] = args.video
-            ctx_kwargs["record_video_size"] = {"width": args.vw, "height": args.vh}
-        ctx = browser.new_context(**ctx_kwargs)
+        ctx = browser.new_context(
+            viewport={"width": vw_css, "height": vh_css},
+            device_scale_factor=scale,
+            accept_downloads=True,
+        )
         page = ctx.new_page()
-
-        if args.maximize and args.headful:
-            maximize_window(page)
+        maximize_window(page)
 
         page.on("dialog", lambda d: d.accept())
         install_catalog_cache(page.context)
 
         # 全部关卡开始前只加载并预热一次 YOLO
         piece_clf = cell_clf = None
-        if not args.no_yolo:
-            try:
-                from yolo_check import Classifier, DET_WEIGHTS, CLS_WEIGHTS
-                if CLS_WEIGHTS.exists():
-                    piece_clf = Classifier(weights=CLS_WEIGHTS)
-                if DET_WEIGHTS.exists():
-                    cell_clf = Classifier(weights=DET_WEIGHTS)
-                if piece_clf is None:
-                    piece_clf = cell_clf
-                if cell_clf is None:
-                    cell_clf = piece_clf
-                dummy = np.full((240, 320, 3), 128, np.uint8)
-                for clf in {id(c): c for c in (piece_clf, cell_clf) if c}.values():
-                    clf.predict(dummy)
-            except Exception as e:
-                print(f"[warn] YOLO 未启用：{e}")
+        try:
+            from yolo_check import Classifier, DET_WEIGHTS, CLS_WEIGHTS
+            if CLS_WEIGHTS.exists():
+                piece_clf = Classifier(weights=CLS_WEIGHTS)
+            if DET_WEIGHTS.exists():
+                cell_clf = Classifier(weights=DET_WEIGHTS)
+            if piece_clf is None:
+                piece_clf = cell_clf
+            if cell_clf is None:
+                cell_clf = piece_clf
+            dummy = np.full((240, 320, 3), 128, np.uint8)
+            for clf in {id(c): c for c in (piece_clf, cell_clf) if c}.values():
+                clf.predict(dummy)
+        except Exception as e:
+            print(f"[warn] YOLO 未启用：{e}")
 
         summary = []
         exported_files = []
         part_names = {1: "Part 1 · 照片", 2: "Part 2 · 纯白", 3: "Part 3 · 混合"}
         for idx, (pt, df) in enumerate(schedule):
-            sub_shots = (
-                (shots_root / f"p{pt}_{df}" if len(schedule) > 1 else shots_root)
-                if shots_root else None
-            )
             cur, tot, dt = solve_one_bonus_level(
-                page, pt, df, args.mode, piece_clf, cell_clf, args, shots=sub_shots
+                page, pt, df, mode, piece_clf, cell_clf
             )
             summary.append((pt, df, cur, tot, dt))
             proof_path = export_round_evidence_and_pause(
                 page,
-                prefix=f"{idx + 1:02d}_{args.mode}_p{pt}_{df}",
+                prefix=f"{idx + 1:02d}_{mode}_p{pt}_{df}",
                 cur=cur,
                 tot=tot,
-                evidence_dir=evidence_dir,
-                pause=args.pause,
-                pause_enter=args.pause_enter,
+                evidence_dir=ev_dir,
+                pause=PAUSE,
                 has_next=(idx < len(schedule) - 1),
             )
             if proof_path is not None:
                 exported_files.append(proof_path)
 
-        if len(summary) > 1:
-            total_dt = round(time.time() - t_start, 1)
-            passed = sum(1 for _, _, c, t, _ in summary if c == t and t > 0)
-            print("\n" + "=" * 64)
-            print(f"附加题 ({args.mode}) 全部关卡汇总：{passed}/{len(summary)} 关通关 | 总用时 {total_dt}s")
-            print("-" * 64)
-            for pt, df, c, t, dt in summary:
-                r_sz = int(round(df ** 0.5))
-                ok_s = "✅ 通关" if (c == t and t > 0) else "❌ 未完成"
-                print(f"  {part_names.get(pt, f'Part {pt}'):<14} | {r_sz}×{r_sz} ({df:>2}格) | "
-                      f"{c:>2}/{t:<2} | {dt:>5.1f}s | {ok_s}")
-            if evidence_dir is not None:
-                print("-" * 64)
-                print(f"网站 JSON 完成证明已导出 ({len(exported_files)}/{len(summary)} 份)：{evidence_dir}")
-            print("=" * 64)
+        total_dt = round(time.time() - t_start, 1)
+        passed = sum(1 for _, _, c, t, _ in summary if c == t and t > 0)
+        print("\n" + "=" * 64)
+        print(f"附加题 ({mode}) 全部关卡汇总：{passed}/{len(summary)} 关通关 | 总用时 {total_dt}s")
+        print("-" * 64)
+        for pt, df, c, t, dt in summary:
+            r_sz = int(round(df ** 0.5))
+            ok_s = "✅ 通关" if (c == t and t > 0) else "❌ 未完成"
+            print(f"  {part_names.get(pt, f'Part {pt}'):<14} | {r_sz}×{r_sz} ({df:>2}格) | "
+                  f"{c:>2}/{t:<2} | {dt:>5.1f}s | {ok_s}")
+        print("-" * 64)
+        print(f"网站 JSON 完成证明已导出 ({len(exported_files)}/{len(summary)} 份)：{ev_dir}")
+        print("=" * 64)
 
-        if args.headful:
-            if args.auto_close:
-                page.wait_for_timeout(1500)
-            elif sys.stdin and sys.stdin.isatty():
-                try:
-                    input("按回车关闭…")
-                except (EOFError, KeyboardInterrupt):
-                    pass
-        if ctx is not None:
-            page.close()
-            ctx.close()
+        if auto_close:
+            page.wait_for_timeout(1500)
+        elif sys.stdin and sys.stdin.isatty():
+            try:
+                input("按回车关闭…")
+            except (EOFError, KeyboardInterrupt):
+                pass
+        page.close()
+        ctx.close()
         browser.close()
         all_ok = all(c == t and t > 0 for _, _, c, t, _ in summary)
         return 0 if all_ok else 1

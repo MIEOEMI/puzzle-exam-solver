@@ -2,7 +2,7 @@
 """环境自检：一条命令查出为什么跑不起来。
 
 用法（在仓库根目录执行）：
-    python doctor.py
+    python tools/doctor.py
 
 它会逐项检查 Python 版本、依赖包、Chrome、模型文件、导入链，
 每项都给出 **怎么办** 的具体命令。
@@ -18,7 +18,7 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 OK, BAD, WARN = "✅", "❌", "⚠️ "
 
 # Windows 控制台默认 cp936，直接打印 ✅ 会 UnicodeEncodeError，自检脚本自己先崩
@@ -85,13 +85,21 @@ def check_imports():
         line(BAD, "导入 white_shape", f"{type(e).__name__}: {e}")
         problems.append("white_shape")
 
-    for runner in ("run_basic.py", "run_bonus_overlap.py", "run_bonus_center.py"):
+    for mod in ("run_exam", "run_overlap"):
+        try:
+            __import__(mod)
+            line(OK, f"导入 {mod}")
+        except Exception as e:
+            line(BAD, f"导入 {mod}", f"{type(e).__name__}: {e}")
+            problems.append(mod)
+
+    for runner in ("run_basic.py", "run_bonus_overlap.py", "run_bonus_center.py", "run_demo_all.py"):
         p = ROOT / runner
         if not p.exists():
             line(BAD, f"运行器 {runner}", "文件不存在", "git pull 拉取最新代码")
             problems.append(runner)
             continue
-        r = subprocess.run([sys.executable, str(p), "--help"],
+        r = subprocess.run([sys.executable, "-m", "py_compile", str(p)],
                            capture_output=True, text=True,
                            encoding="utf-8", errors="replace")
         if r.returncode == 0:
@@ -99,7 +107,7 @@ def check_imports():
         else:
             err = (r.stderr or r.stdout).strip().splitlines()
             line(BAD, f"运行器 {runner}", err[-1] if err else "退出码 %d" % r.returncode,
-                 f"单独运行 python {runner} --help 看完整报错")
+                 f"检查 {runner} 语法报错")
             problems.append(runner)
 
 
@@ -300,13 +308,13 @@ def main():
         print("  python -m playwright install chrome")
         return 1
     print("环境检查全部通过。可以运行：")
-    print("  python run_basic.py --part 3 --diff 25")
+    print("  python run_basic.py")
     return 0
 
 
 if __name__ == "__main__":
-    # python doctor.py              环境自检
-    # python doctor.py --start-test 只实测一次开局（定位"卡在选择难度界面"）
+    # python tools/doctor.py              环境自检
+    # python tools/doctor.py --start-test 只实测一次开局（定位"卡在选择难度界面"）
     if "--start-test" in sys.argv:
         sys.exit(start_test(headful="--headful" in sys.argv))
     sys.exit(main())
