@@ -6,6 +6,11 @@
 实测结果（最终配置：OpenCV + YOLO11s 检测 + 分类模型）：
 **累计 9 局全部 25/25 通关，单局 25–36 秒**，全程无需人工干预。
 
+> **模型在哪**：仓库根目录的 **`models/`**，两个权重随仓库分发，不用另外下载 ——
+> `models/puzzle_yolo11s_det15.pt`（YOLO11s 检测，18.3 MB，主力）+
+> `models/puzzle_yolov8n_cls15.pt`（YOLOv8n 分类，2.9 MB，碎片用）。
+> 详见 §四。
+
 | 局次 | 类别一致命中 | 用时 | 结果 |
 |---|---|---|---|
 | 1–5（分类模型阶段） | 50–56 对 | 20–33s | 25/25 ✅ |
@@ -122,7 +127,7 @@ def has_anchor(cell):
 
 ---
 
-## 四、YOLO 模型（按考核提示自训：YOLO11s 检测）
+## 四、模型文件与 YOLO 训练（两个权重都在仓库 `models/` 目录下）
 
 考核方给出的题库类别提示写明：
 
@@ -150,7 +155,22 @@ def has_anchor(cell):
 - 训练：`tools/train_yolo11s.py`，`yolo11s`，416×416，40 epochs，CPU
 - **验证集：Precision 0.960 / Recall 0.942 / mAP50 0.989 / mAP50-95 0.859**
 
-模型文件：`models/puzzle_yolo11s_det15.pt`（18 MB，已去掉优化器状态）
+### 两个权重文件在哪（就在仓库里，随仓库分发，不用另外下载）
+
+| 文件（仓库内路径） | 任务 | 管哪一段 | 大小 |
+|---|---|---|---|
+| **`models/puzzle_yolo11s_det15.pt`** | 检测 detect · 15 类 | 参考图切出的**完整格子**（320×240）→ 物体类别，主力模型 | 18.3 MB |
+| **`models/puzzle_yolov8n_cls15.pt`** | 分类 classify · 15 类 | 托盘里的**拼图碎片**（81×60 裁片）→ 物体类别 | 2.9 MB |
+
+代码里的绑定在 **`solver/yolo_check.py`**，路径相对仓库根目录：
+
+```python
+DET_WEIGHTS = HERE / "models" / "puzzle_yolo11s_det15.pt"
+CLS_WEIGHTS = HERE / "models" / "puzzle_yolov8n_cls15.pt"
+```
+
+> det 权重已去掉优化器状态，只留推理所需部分。两个文件任一缺失时，程序打印
+> `[warn] YOLO 未启用，退回纯 OpenCV`，仍能解题（见本节末「YOLO 缺席也能解」）。
 
 ### 两个模型，各管一段
 
@@ -357,9 +377,9 @@ python run_bonus_center.py  --no-headful --auto-close
 │   ├── raw/<class>/*.jpg     388 张训练素材
 │   ├── det/labels/           388 个检测标注（YOLO 格式）
 │   └── manifest.json         类别与文件清单
-├── models/
-│   ├── puzzle_yolo11s_det15.pt   YOLO11s 检测模型（18MB，主力）
-│   └── puzzle_yolov8n_cls15.pt   分类模型（碎片用）
+├── models/                       两个 YOLO 权重（随仓库分发，见 §四）
+│   ├── puzzle_yolo11s_det15.pt   YOLO11s 检测模型（18.3MB，主力）
+│   └── puzzle_yolov8n_cls15.pt   YOLOv8n 分类模型（2.9MB，碎片用）
 ├── demo/
 │   ├── demo_part3_5x5.mp4    演示视频（25/25 通关）
 │   └── screenshots/          过程截图
