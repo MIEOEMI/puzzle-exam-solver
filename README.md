@@ -449,13 +449,14 @@ CLS_WEIGHTS = HERE / "models" / "puzzle_yolov8n_cls15.pt"
 
 ### 鲁棒性：YOLO 缺席也能解
 
-`--no-yolo` 可完全关掉 YOLO。**实测纯 OpenCV 仍 25/25（29.8 秒）**——
+`models/` 下任一权重缺失（或加载失败）时，程序打印
+`[warn] YOLO 未启用，退回纯 OpenCV`，然后照常跑。**实测纯 OpenCV 仍 25/25（29.8 秒）**——
 YOLO 是加分项和语义校验，不在解题关键路径上，模型出问题也不会导致解不出来。
 
 | 配置 | 结果 | 用时 |
 |---|---|---|
 | OpenCV + YOLO11s 检测 + 分类 | **25/25，连续 4 局** | 25–30s |
-| 纯 OpenCV（`--no-yolo`） | 25/25 | 29.8s |
+| 纯 OpenCV（删掉/改名 `models/*.pt`） | 25/25 | 29.8s |
 
 ---
 
@@ -487,53 +488,36 @@ python tools/doctor.py --start-test  # 只实测"开局"这一段，量出准备
 它把同一段开局逻辑跑一遍，打印 `准备中 0s… / 10s… / 成功 0/25，用时 11.8s`。
 站点素材下载慢（实测单张 0.3–2.4s，开局要下 55 张）时这一步就是十几秒到几十秒。
 
-### 一键跑
+### 三个入口（都无参数，直接跑）
 
-```powershell
-# Part 3 · 5×5，弹窗口看过程（默认有头）
-python run_basic.py
+| 命令 | 跑什么 | 默认行为 |
+|---|---|---|
+| `python run_basic.py` | 基础题 9 关（Part 1/2/3 × 9/16/25） | 有头（看得见窗口）、每局结束停顿 5s、自动导出官网 JSON 完成证明 |
+| `python run_bonus_overlap.py` | 附加题 A · 初始重叠，9 关 | 同上 |
+| `python run_bonus_center.py` | 附加题 B · 初始居中，9 关 | 同上 |
+| `python run_demo_all.py` | 三套全部 27 关连续演示 | 基础 → 重叠 → 居中，套间停顿 5s |
 
-# 无头跑
-python run_basic.py --no-headful
+> 入口是仓库根目录的 `run_*.py`，不要在别的目录运行；它自己把 `solver/` 注入 `sys.path`。
 
-# 放慢，方便肉眼跟
-python run_basic.py --slow 0.05
+**参数已经全部移除**：`--part`、`--diff`、`--no-headful`、`--slow`、`--video`、`--shots`、
+`--start-timeout`、`--no-yolo`、`run_overlap_matrix.py` 都不存在了。
 
-# 录屏 + 截图
-python run_basic.py --video .\video_out --shots .\shots
-
-# 其他部分/难度
-python run_basic.py --part 1 --diff 25
-python run_basic.py --part 2 --diff 16
-
-# 网络特别慢时，把开局等待放宽（默认 90s）
-python run_basic.py --start-timeout 180
-```
-
-> 入口是仓库根目录的 `run_basic.py`，不要在别的目录运行；它自己注入 `solver/` 的路径。
-
-### 附加题入口
-
-```powershell
-python run_bonus_overlap.py --diff 9          # 初始重叠 · 3×3（先小格试）
-python run_bonus_center.py  --diff 9          # 初始居中 · 3×3
-python run_overlap_matrix.py --mode overlap --diffs 9,16 --rounds 2 --pause 5
-#   汇总写到 runs/bonus_matrix_<mode>/SUMMARY.md，每局日志同目录
-```
-
-三个入口与基础题共用同一套窗口/编码/开局逻辑：默认最大化、`--no-headful` 无头、
-`--start-timeout` 控制等待。附加题结果见 §8。
+- 只想跑某一关：临时改 `solver/run_exam.py` 顶部的 `PARTS` / `DIFFS`（`run_overlap.py` 同理）。
+- 入口没有 argparse，**敲 `--help` 会直接开始跑 9 关**，别手滑。
+- 想无头跑：改 `p.chromium.launch(..., headless=True)`；服务器无显示器时用
+  `xvfb-run -a -s "-screen 0 1600x1000x24" ./venv/bin/python run_basic.py`。
 
 ### 输出
 
+每局结束自动点站点「导出本场证据（JSON）」按钮，落地到：
+
 ```
-shots/01_start_canvas.png   开局画布
-shots/02_after_photo.png    照片块放完后
-shots/03_final.png          最终状态
-shots/04_page.png           整页截图
+runs/evidence/basic_<时间戳>/01_basic_p1_9_exam-evidence.json
+runs/evidence/overlap_<时间戳>/...
 ```
 
-终端会逐块打印进度，最后输出 `=== 结果 25/25 | 用时 24.5s | 🎉 通关 ===`。
+跑完在终端打印汇总表（Part × 难度 × 得分 × 用时 × 是否通关），
+全部通关 `return 0`，有任意一关没满分 `return 1`（方便脚本判断）。
 
 ### 重新训练模型
 
@@ -556,7 +540,7 @@ shots/04_page.png           整页截图
 | 诱饵靠阈值筛不掉 | 诱饵与真块低分区重叠 | 改用匈牙利全局指派，落选者即诱饵 |
 | 吸附阈值太紧 | 差一格就吸不上 | 0.14×格子宽 ≈ 11px，必须精确瞄格心 |
 | 合成事件无效 | 派发 MouseEvent 不吸附 | `checkSnap` 校验 `board.dragging === piece`，只有真实指针按下才置位 |
-| **一直卡在选择难度界面 / 准备中…** | 浏览器停在开局面板，进度一直是 `0 / 9` | 站点 `startPart()` 里 `await loadTheme()` 要等 25 张照片 + 5 张诱饵 + 25 张参考图**全部 onload** 才把进度切成 `0 / 25`（实测 10–40s）。旧代码只等 10s，超时后又去点按钮——但此时 `busy=true`、按钮 `disabled`，点击被静默吞掉，重试 4 次全落空后抛「开局失败」。现在 `start_exam()` 只点一次、轮询到 `0/diff`（默认 90s，`--start-timeout` 可调），真超时才整页重载重来 |
+| **一直卡在选择难度界面 / 准备中…** | 浏览器停在开局面板，进度一直是 `0 / 9` | 站点 `startPart()` 里 `await loadTheme()` 要等 25 张照片 + 5 张诱饵 + 25 张参考图**全部 onload** 才把进度切成 `0 / 25`（实测 10–40s）。旧代码只等 10s，超时后又去点按钮——但此时 `busy=true`、按钮 `disabled`，点击被静默吞掉，重试 4 次全落空后抛「开局失败」。现在 `start_exam()` 只点一次、轮询到 `0/diff`（`START_TIMEOUT` 常量，默认 90s），真超时才整页重载重来 |
 | Windows 控制台 `UnicodeEncodeError: 'gbk' codec` | 跑到一半整个进程崩，或 `doctor.py` 第一行就崩 | 控制台默认 cp936，打印 `✅ / ❌ / 🎉` 立刻抛异常。现在入口统一调 `solver/console.py:force_utf8()`，把 stdout 切 UTF-8 并把控制台代码页设成 65001 |
 | **鼠标在动，但一块都吸不上（2026-11-18 版本）** | 开局正常、屏幕上块也会被拖着走，进度永远 `0 / 25`，日志全是 ❌ | 站点新版加了 `StateGuard`：`startPart()` 是**先** `setDimensions(5,5)`、**再** `await` 下 25+5+25 张图、最后才 `buildPieces()`。这段窗口里棋盘还是上一局的 9 块，1.2s 一次的对账看到 `cells 9 != grid 25` → 判篡改 → `locked = true`（且 violations 会一直留着，之后每轮都锁）。修法：① 素材改由本地 `dataset/raw` 供给（`install_catalog_cache`），开局从 40–70s 降到 0.5s，窗口短到基本撞不上；② 开局后查 `data-tamper`，撞上了就整页重载重开（最多 5 次）。实测 10 局：9×25/25 + 1×24/25，重试分别触发过 1 次和 2 次 |
 | 开局点了没反应，进度还是上一局的 `0 / 9` | 拿 9 格棋盘去分析，报告"一块都找不到" | 演示局默认 `0 / 9`，和"没开局"长得一模一样；必须等到 `0 / 25` 才算开好（见上一条） |
@@ -577,8 +561,8 @@ shots/04_page.png           整页截图
 
 站点 `PuzzleBoard.js` 将棋盘高度上限 `550px` 固定在 **Canvas 位图像素**（`CSS 尺寸 × devicePixelRatio`）上：
 - 在低 DPR（`DPR=1.0`）小屏（如 `1280×800`）下，位图仅 `919×590`，棋盘上方净空仅 `67px`（远小于 3×3 含双凸齿块高 `~277px`），会触发 `[检验台不足]` 告警并整关失败。
-- 现在 `solver/run_overlap.py` 在未显式传 `--dpr` 时，会自动按视口尺寸抬高 Playwright 上下文的 `device_scale_factor`（确保画布位图达到 `≥ 1820×1180`，例如 `1280×800` 自动用 `DPR=2.0` -> 位图 `1838×1196`，上方净空 `320px`、右侧净空 `552px`）。实测在 **`1280×800` 无头模式（无需 `xvfb`）** 下 `run_bonus_overlap.py` **9/9 关全部满分通关（166.6s）**。
-- 若用户手动传 `--dpr 1.0` 压低分辨率，程序仍会在 `overlap`（上方净空）与 `center`（右侧净空）两种模式下自动执行检验台尺寸自检并给出提示。
+- 现在 `solver/run_overlap.py` 会自动按视口尺寸抬高 Playwright 上下文的 `device_scale_factor`（确保画布位图达到 `≥ 1820×1180`，例如 `1280×800` 自动用 `DPR=2.0` -> 位图 `1838×1196`，上方净空 `320px`、右侧净空 `552px`）。实测在 **`1280×800` 无头模式（无需 `xvfb`）** 下 `run_bonus_overlap.py` **9/9 关全部满分通关（166.6s）**。
+- 抬升上限是 `3.0`，全自动，不需要手动指定 DPR；`overlap`（上方净空）与 `center`（右侧净空）两种模式下都会先做检验台尺寸自检，装不下时打印所需画布高度。
 
 ```bash
 # 基础题 / 附加题：任意屏幕或无头环境直接运行（默认每局停顿 5 秒并导出官网 JSON 完成证明）
@@ -587,9 +571,8 @@ python run_bonus_overlap.py
 python run_bonus_center.py
 python run_demo_all.py
 
-# 无头快速验证示例
-python run_bonus_overlap.py --no-headful --auto-close
-python run_bonus_center.py  --no-headful --auto-close
+# 无头 / 自动关闭：把 launch 的 headless 改成 True、main(auto_close=True) 即可；
+# 服务器无显示器时用 xvfb-run 包一层，见上一节
 ```
 
 ---
@@ -603,7 +586,6 @@ python run_bonus_center.py  --no-headful --auto-close
 ├── run_basic.py              基础题入口（Part1/2/3 × 9/16/25）
 ├── run_bonus_overlap.py      附加题入口 A：初始重叠
 ├── run_bonus_center.py       附加题入口 B：初始居中
-├── run_overlap_matrix.py     附加题批量：多难度 × 多轮 + 间隔
 │
 ├── solver/                   求解器（不含浏览器操作）
 │   ├── solver_core.py        布局复现、块分类、匈牙利指派、锚点排序
